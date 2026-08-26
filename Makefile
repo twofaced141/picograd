@@ -18,10 +18,22 @@ MKLROOT  ?= /opt/intel/oneapi/mkl/latest
 SDE      ?= $(HOME)/tools/sde/sde
 SDE_CPU  ?= -spr
 
+# GPU backend: cpu (default) | cuda
+# cuda uses CUDA Driver API via dlopen + embedded PTX kernels;
+# no CUDA toolkit is needed to build or run it, only the NVIDIA driver.
+BACKEND   ?= cpu
+
 BUILD    := build
 
-SRC      := $(shell find src -name '*.c')
+SRC      := $(shell find src -name '*.c' -not -path 'src/backend/cuda/*')
 ASM      := $(shell find src -name '*.S')
+
+ifeq ($(BACKEND),cuda)
+CPPFLAGS += -DPICOGRAD_BACKEND_CUDA
+LDLIBS   += -ldl
+SRC      += $(wildcard src/backend/cuda/*.c)
+endif
+
 OBJ      := $(patsubst %.c,$(BUILD)/%.o,$(SRC)) $(patsubst %.S,$(BUILD)/%.o,$(ASM))
 DEP      := $(OBJ:.o=.d)
 
@@ -30,10 +42,14 @@ LIB      := $(BUILD)/libpicograd.a
 TESTS    := $(patsubst tests/%.c,$(BUILD)/%,$(wildcard tests/*.c))
 EXAMPLES := $(patsubst examples/%.c,$(BUILD)/%,$(wildcard examples/*.c))
 BENCH    := $(BUILD)/bench_gemm
+BENCH_GPU :=
+ifeq ($(BACKEND),cuda)
+BENCH_GPU := $(BUILD)/bench_gemm_cuda
+endif
 
-.PHONY: all test examples bench test-sde clean
+.PHONY: all test examples bench bench-gpu test-sde clean
 
-all: $(LIB) $(TESTS) $(EXAMPLES)
+all: $(LIB) $(TESTS) $(EXAMPLES) $(BENCH_GPU)
 
 # library
 
@@ -77,6 +93,14 @@ $(BENCH): benchmarks/bench_gemm.c $(LIB)
 
 bench: $(BENCH)
 	./$(BENCH)
+
+# GPU backend benchmark (requires BACKEND=cuda and a CUDA GPU)
+
+$(BENCH_GPU): benchmarks/bench_gemm_cuda.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
+bench-gpu: $(BENCH_GPU)
+	./$(BENCH_GPU)
 
 clean:
 	rm -rf $(BUILD)

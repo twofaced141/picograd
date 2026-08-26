@@ -1,6 +1,6 @@
 #include "matmul.h"
 
-#include "../backend/cpu/gemm.h"
+#include "../backend/backend.h"
 #include "common.h"
 #include "elementwise.h"
 #include <assert.h>
@@ -114,10 +114,10 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
     size_t midx[PG_MAX_NDIM] = {0};
     size_t oa = 0, ob = 0;
     for (size_t s = 0; s < nbatch; s++) {
-        pg_cpu_gemm(am, bn, ak,
-                    a->data + oa, av ? a->stride[ra - 1] : a->stride[ra - 2],
-                    b->data + ob, bv ? b->stride[rb - 1] : b->stride[rb - 2],
-                    out->data + s * am * bn, bn);
+        pg_gemm(am, bn, ak,
+                a->data + oa, av ? a->stride[ra - 1] : a->stride[ra - 2],
+                b->data + ob, bv ? b->stride[rb - 1] : b->stride[rb - 2],
+                out->data + s * am * bn, bn);
         for (size_t d = bnd; d-- > 0;) {
             midx[d]++;
             oa += sa_bat[d];
@@ -150,10 +150,10 @@ pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
         return NULL;
 
     for (size_t s = 0; s < batch; s++)
-        pg_cpu_gemm(m, n, k,
-                    a->data + s * m * k, k,
-                    b->data + s * k * n, n,
-                    out->data + s * m * n, n);
+        pg_gemm(m, n, k,
+                a->data + s * m * k, k,
+                b->data + s * k * n, n,
+                out->data + s * m * n, n);
     return out;
 }
 
