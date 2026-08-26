@@ -58,11 +58,15 @@ available — its kernels come almost for free on top of the CUDA path
   - benchmark `benchmarks/bench_gemm_cuda.c` (+ `make BACKEND=cuda
     bench-gpu`): GFLOP/s at 512..4096 and accuracy check vs pg_cpu_gemm.
   Left to validate on real hardware (Colab):
-  - [ ] `make BACKEND=cuda && ./build/test_backend` — roundtrip green;
-  - [ ] `./build/bench_gemm_cuda` — collect T4 numbers, compare with CPU AVX2;
-  - [ ] if PTX/driver mismatch — raise the PTX version flag in the script.
-  Notes: sm_75 PTX JITs on all newer architectures (Ampere+) but NOT on
-  pre-Turing GPUs — add a second target to the script if ever needed.
+  - [x] `make BACKEND=cuda && ./build/test_backend` — roundtrip green,
+    max abs err 0 at 512³ (test data is dyadic so fp32 stays exact);
+  - [x] `./build/bench_gemm_cuda` — measured on Tesla T4
+    (driver 580.82.07): 638 GFLOP/s @512, 621 @1024, 701 @2048,
+    844 @4096 → ~8–10% of the 8.1 TFLOPS fp32 peak, launch overhead
+    visible at small sizes;
+  - [ ] optional tuning: register blocking (TM×TN micro-tiles per thread)
+    should cut shared-memory traffic ~TILE-fold; expect 3–6 TFLOPS.
+    Deferred until after M3 per plan.
 
 - [ ] **M2 — Metal minimum** (tested on M4)
   Obj-C++ / metal-cpp shim: device, command queue, buffers.
