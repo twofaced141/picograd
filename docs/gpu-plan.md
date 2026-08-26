@@ -1,100 +1,104 @@
-# План поддержки GPU-бэкендов (ROCm / CUDA / Metal)
+# GPU backend plan (ROCm / CUDA / Metal)
 
-Порядок определён доступным железом: CUDA тестируется в Google Colab,
-Metal — на локальном M4. HIP/ROCm переносится в конец до появления AMD-машины:
-его кернелы почти бесплатны поверх CUDA-пути (hipify или общий исходник).
+Backends are added one at a time; each next one reuses the seam built by
+the previous. Order follows available hardware: CUDA is tested in Google
+Colab, Metal on a local M4. HIP/ROCm is deferred until AMD hardware is
+available — its kernels come almost for free on top of the CUDA path
+(hipify or shared source).
 
-## Архитектурные решения
+## Design decisions
 
-1. **Единый интерфейс бэкенда** — `src/backend/backend.h`. Точка входа
-   `pg_gemm(...)` (майлстоун 0) + `pg_set_device` / `pg_dev_malloc` /
-   `pg_copy_h2d/d2h` / `pg_dev_sync`. Каждый бэкенд реализует таблицу
-   `pg_backend_ops` (`src/backend/backend_i.h`), `pg_set_device`
-   проактивно инициализирует бэкенд и не переключает девайс при неудаче.
-2. **Zero-dependency GPU** (принцип pico): никаких вендорских библиотек
-   (cuBLAS отвергнут как проприетарная зависимость). NVIDIA-бэкенд ходит
-   в CUDA Driver API через `dlopen("libcuda.so.1")` — эта библиотека
-   ставится вместе с драйвером, toolkit для сборки и запуска не нужен.
-   Кернелы компилируются локальным clang'ом в PTX (nvptx64-таргет) и
-   вшиваются в либу (`sgemm_ptx.h`); драйвер JIT-ит PTX под текущий GPU.
-3. **Собственные кернелы**: tiled shared-memory sgemm (плитка 32×32,
-   row-major нативно). Ожидание по производительности: 50–70% пика
-   против ~95% у вендорских библиотек — осознанный компромисс ради
-   чистоты ядра; узкие места потом оптимизируем сами (регистровый
-   блокинг, двойная буферизация).
-4. **Глобальный текущий девайс** (`pg_set_device`) вместо пер-тензорового поля.
-   Все новые тензоры и временные узлы автограда создаются на текущем девайсе;
-   оперы ассертят однородность. Миграция на per-tensor device локальна.
-5. Два языка кернелов: C→PTX (NVIDIA, clang) и `.metal` (Apple).
-   HIP позже переиспользует кернелы CUDA-пути.
-6. CPU остаётся фоллбеком навсегда; AVX2/AVX-512 ядра не трогаем.
-7. Один GPU-бэкенд на сборку (`make BACKEND=cpu|cuda|metal|hip`),
-   мультидевайс в рантайме — вне скоупа первого этапа.
+1. **Single backend interface** — `src/backend/backend.h`. Entry point
+   `pg_gemm(...)` (milestone 0) plus `pg_set_device` / `pg_dev_malloc` /
+   `pg_copy_h2d/d2h` / `pg_dev_sync`. Every backend implements the
+   `pg_backend_ops` table (`src/backend/backend_i.h`). `pg_set_device`
+   proactively initializes the backend and does not switch the device
+   on failure.
+2. **Zero-dependency GPU** (the pico principle): no vendor libraries
+   (cuBLAS rejected as a proprietary dependency). The NVIDIA backend talks
+   to the CUDA Driver API via `dlopen("libcuda.so.1")` — that library ships
+   with the driver, not the toolkit, so neither building nor running needs
+   a CUDA toolkit install. Kernels are compiled by plain clang to PTX
+   (nvptx64 target) and embedded into the static library (`sgemm_ptx.h`);
+   the driver JITs the PTX for the actual GPU.
+3. **Own kernels**: tiled shared-memory sgemm (32×32 tiles, native
+   row-major). Performance expectation: 50–70% of peak versus ~95% for
+   vendor libraries — a deliberate trade for a clean core; hot spots get
+   optimized later ourselves (register blocking, double buffering).
+4. **Global current device** (`pg_set_device`) instead of a per-tensor
+   field. All new tensors and autograd temporaries are created on the
+   current device; ops assert homogeneity. Migration to per-tensor device
+   later is localized.
+5. Two kernel languages: C→PTX (NVIDIA, clang) and `.metal` (Apple).
+   HIP reuses the CUDA-path kernels later.
+6. CPU remains the fallback forever; AVX2/AVX-512 kernels stay untouched.
+7. One GPU backend per build (`make BACKEND=cpu|cuda|metal|hip`);
+   multi-device at runtime is out of scope for now.
 
-## Майлстоуны
+## Milestones
 
-- [x] **M0 — шов диспетчера** (сделано)
-  `src/backend/backend.{h,c}` с `pg_gemm()`; все вызовы GEMM из
-  `src/ops/matmul.c` идут через диспетчер. Поведение не изменилось,
-  тесты зелёные.
+- [x] **M0 — dispatch seam** (done)
+  `src/backend/backend.{h,c}` with `pg_gemm()`; every GEMM call in
+  `src/ops/matmul.c` goes through the dispatcher. No behavior change,
+  tests green.
 
-- [ ] **M1 — CUDA минимум, собственные кернелы** (тесты: Google Colab T4)
-  Сделано:
-  - driver API loader: `src/backend/cuda/driver.{h,c}` — dlopen libcuda.so.1,
-    биндинг cu* функций, контекст девайса 0;
-  - кернел: `kernels/kernel_sgemm.c` (C с inline-PTX: tid/ctaid/bar.sync,
-    shared через address_space(3)); сборка в PTX —
+- [ ] **M1 — CUDA minimum, own kernels** (tested on Google Colab T4)
+  Done:
+  - driver API loader: `src/backend/cuda/driver.{h,c}` — dlopens
+    libcuda.so.1, binds cu* symbols, creates the context for device 0;
+  - kernel: `kernels/kernel_sgemm.c` (plain C with inline PTX:
+    tid/ctaid/bar.sync, shared memory via address_space(3)); PTX build is
     `src/backend/cuda/build-ptx.sh` (clang nvptx64 + sed .func→.entry +
-    xdd-embed), PTX коммитится в репо;
-  - бэкенд: `src/backend/cuda/cuda.c` — init/malloc/copy/sync/gemm
-    (запуск pg_sgemm_kernel сеткой (n/32, m/32));
-  - тест `tests/test_backend.c`: CPU-dispatch корректность + полный
-    h2d→gemm→d2h раундтрип против референса; без драйвера — graceful skip;
-  - бенчмарк `benchmarks/bench_gemm_cuda.c` (+ `make BACKEND=cuda bench-gpu`):
-    GFLOP/s на 512..4096 и проверка точности против pg_cpu_gemm.
-  Осталось проверить на реальном GPU (Colab):
-  - [ ] `make BACKEND=cuda && ./build/test_backend` — раундтрип зелёный;
-  - [ ] `./build/bench_gemm_cuda` — снять цифры T4, сравнить с CPU AVX2;
-  - [ ] при расхождении PTX/драйвера — поднять версию PTX флага в скрипте.
-  Заметки: PTX sm_75 JIT-ится на всех новых архитектурах (Ampere+),
-  но НЕ на старее Pascal — при необходимости добавить вторую цель в скрипт.
+    xxd embed); the PTX is committed;
+  - backend: `src/backend/cuda/cuda.c` — init/malloc/copy/sync/gemm
+    (launches pg_sgemm_kernel on a (n/32, m/32) grid);
+  - test `tests/test_backend.c`: CPU-dispatch correctness + full
+    h2d→gemm→d2h roundtrip against a reference; graceful skip without a
+    driver;
+  - benchmark `benchmarks/bench_gemm_cuda.c` (+ `make BACKEND=cuda
+    bench-gpu`): GFLOP/s at 512..4096 and accuracy check vs pg_cpu_gemm.
+  Left to validate on real hardware (Colab):
+  - [ ] `make BACKEND=cuda && ./build/test_backend` — roundtrip green;
+  - [ ] `./build/bench_gemm_cuda` — collect T4 numbers, compare with CPU AVX2;
+  - [ ] if PTX/driver mismatch — raise the PTX version flag in the script.
+  Notes: sm_75 PTX JITs on all newer architectures (Ampere+) but NOT on
+  pre-Turing GPUs — add a second target to the script if ever needed.
 
-- [ ] **M2 — Metal минимум** (тесты: M4)
-  Obj-C++ / metal-cpp шим: device, command queue, буферы.
-  GEMM — собственный MSL-кернел (та же tiled-схема; MPS отвергнут по той же
-  причине, что и cuBLAS). Та же точка `pg_gemm`, тот же контракт тестов.
-  Бонус Metal: шейдеры компилируются системой в рантайме из исходника —
-  отдельный пайплайн сборки не нужен.
+- [ ] **M2 — Metal minimum** (tested on M4)
+  Obj-C++ / metal-cpp shim: device, command queue, buffers.
+  GEMM — own MSL kernel (same tiled scheme; MPS rejected for the same
+  reason as cuBLAS). Same `pg_gemm` entry point, same test contract.
+  Metal bonus: shaders are compiled by the system from source at runtime —
+  no separate build pipeline needed.
 
-- [ ] **M3 — кернелы elementwise/reduce/активаций**
-  Map/reduce-кернелы (генерация макросами из одной декларации операции)
-  для `.cu`→PTX и `.metal`; softmax/log_softmax. После этого автоград работает
-  на девайсе автоматически (backward переиспользует оперы), и XOR-пример
-  идёт целиком на GPU без копирований в горячем цикле.
+- [ ] **M3 — elementwise/reduce/activation kernels**
+  Map/reduce kernels (macro-generated from a single op declaration) for
+  `.cu`→PTX and `.metal`; softmax/log_softmax. After that autograd works
+  on-device automatically (backward reuses ops), and the XOR example runs
+  fully on GPU with no copies in the hot loop.
 
-- [ ] **M4 — HIP/ROCm** (когда появится AMD-железо)
-  dlopen libamdhip64.so, HSA-путь; кернелы M3 портируются hipify'ем.
-  Интерфейс готов, оценка 1–2 дня.
+- [ ] **M4 — HIP/ROCm** (when AMD hardware is available)
+  dlopen libamdhip64.so, HSA path; M3 kernels ported via hipify.
+  Interface is ready; estimate 1–2 days.
 
-- [ ] **M5 — хвост**
-  Стримы и pinned memory (асинхронные копирования), index/gather/scatter,
-  полосовые редукции. scan/sort/topk допустимо оставить на CPU надолго.
+- [ ] **M5 — tail**
+  Streams and pinned memory (async copies), index/gather/scatter,
+  strided reductions. scan/sort/topk may stay on CPU indefinitely.
 
-## Тестирование
+## Testing
 
-- Существующие сюиты гоняются с переменной `PG_DEVICE=gpu`: численные
-  градиент-чеки и XOR-пример автоматически валидируют новый бэкенд через
-  тот же публичный API.
-- Допуски `allclose` ослабить для GPU (другой порядок суммирования):
-  rtol/atol ~1e-3 вместо 1e-4.
-- На каждый бэкенд — smoke-скрипт одной командой (важно для эфемерных
-  Colab-сессий).
+- Existing suites run with `PG_DEVICE=gpu`: numeric gradient checks and
+  the XOR example validate the new backend through the same public API.
+- Loosen `allclose` tolerances for GPU (different summation order):
+  rtol/atol ~1e-3 instead of 1e-4.
+- One-command smoke script per backend (important for ephemeral Colab
+  sessions).
 
-## Риски
+## Risks
 
-- Нет локального GPU-цикла «правка→прогон» — итерации только через
-  Colab/M4; закладывать пакетные сессии правок.
-- Собственный sgemm медленнее вендорского (см. ожидания выше); риск
-  застрять в оптимизациях — сначала корректность, скорость после M3.
-- Metal: ограниченный низкоуровневый контроль; отладка шейдеров своеобразная.
-- ROCm: проверять список поддерживаемых GPU до старта M4.
+- No local GPU edit→run loop — iterations go through Colab/M4 only;
+  batch edits into sessions.
+- Own sgemm is slower than vendor libraries (see expectations above);
+  risk of sinking time into tuning — correctness first, speed after M3.
+- Metal: limited low-level control; shader debugging is peculiar.
+- ROCm: check supported-GPU lists before starting M4.
