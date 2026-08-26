@@ -72,6 +72,12 @@ static void test_cpu_dispatch(void)
 
     pg_gemm(M, N, K, a, K, b, N, c, N);
     check_result("cpu", M, N, K, N, c, a, K, b, N);
+
+    float v[4] = {1, 2, 3, 4};
+    float w[2] = {5, 6};
+    float r[2] = {0};
+    pg_gemm(2, 1, 2, v, 2, w, 1, r, 1);
+    CHECK(r[0] == 17.0f && r[1] == 39.0f);
 }
 
 static void test_device_roundtrip(void)
@@ -112,12 +118,6 @@ static void test_device_roundtrip(void)
 
     CHECK(pg_set_device(PG_DEV_CPU) == PG_OK);
     CHECK(pg_get_device() == PG_DEV_CPU);
-
-    float a[4] = {1, 2, 3, 4};
-    float b[2] = {5, 6};
-    float c[2] = {0};
-    pg_gemm(2, 1, 2, a, 2, b, 1, c, 1);
-    CHECK(c[0] == 23.0f && c[1] == 34.0f);
 }
 
 int main(void)
