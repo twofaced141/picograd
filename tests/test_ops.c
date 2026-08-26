@@ -112,7 +112,7 @@ static void test_elementwise(void)
     pg_tensor *s = pg_add(a, b);
     CHECK(s && eq_shape(s, 2, shp));
     CHECKF(s, 0, 11); CHECKF(s, 1, 22); CHECKF(s, 2, 33);
-    CHECKF(s, 3, 14); CHECKF(s, 4, 24); CHECKF(s, 5, 36);
+    CHECKF(s, 3, 14); CHECKF(s, 4, 25); CHECKF(s, 5, 36);
 
     pg_tensor *col = pg_tensor_from_data(2, (size_t[]){2, 1}, (float[]){100, 200});
     pg_tensor *row = pg_tensor_from_data(2, (size_t[]){1, 3}, (float[]){1, 2, 3});
@@ -442,7 +442,8 @@ static void test_matmul(void)
                 }
 
     size_t axa1[1] = {1}, axb1[1] = {1};
-    pg_tensor *td1 = pg_tensordot(da, db, 1, axa1, axb1);
+    pg_tensor *dc = pg_tensor_uniform(4, (size_t[]){4, 3, 5, 6}, -1, 1);
+    pg_tensor *td1 = pg_tensordot(da, dc, 1, axa1, axb1);
     CHECK(td1 && eq_shape(td1, 6, (size_t[]){2, 4, 5, 4, 5, 6}));
     for (size_t i = 0; i < 2; i++)
         for (size_t j = 0; j < 4; j++)
@@ -453,7 +454,7 @@ static void test_matmul(void)
                             double s = 0;
                             for (size_t c = 0; c < 3; c++)
                                 s += (double)da->data[((i * 3 + c) * 4 + j) * 5 + l] *
-                                     (double)db->data[((p * 3 + c) * 5 + q) * 6 + r];
+                                     (double)dc->data[((p * 3 + c) * 5 + q) * 6 + r];
                             CHECK(closef(td1->data[((((i * 4 + j) * 5 + l) * 4 + p) * 5 + q) * 6 + r], (float)s));
                         }
 
@@ -462,7 +463,7 @@ static void test_matmul(void)
     pg_tensor_free(v); pg_tensor_free(vv); pg_tensor_free(vm); pg_tensor_free(mv);
     pg_tensor_free(ba); pg_tensor_free(bb); pg_tensor_free(bc); pg_tensor_free(mbc);
     pg_tensor_free(w); pg_tensor_free(shared); pg_tensor_free(inp); pg_tensor_free(am3);
-    pg_tensor_free(da); pg_tensor_free(db); pg_tensor_free(td); pg_tensor_free(td1);
+    pg_tensor_free(da); pg_tensor_free(db); pg_tensor_free(dc); pg_tensor_free(td); pg_tensor_free(td1);
 }
 
 int main(void)
@@ -476,8 +477,8 @@ int main(void)
     test_matmul();
 
     if (fails == 0)
-        printf("ALL TESTS PASSED\n");
+        printf("test_ops: all passed\n");
     else
-        printf("%d FAILURES\n", fails);
+        printf("test_ops: %d failures\n", fails);
     return fails != 0;
 }

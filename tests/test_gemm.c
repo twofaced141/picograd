@@ -114,6 +114,6 @@ int main(void)
                     fails += check_case(m, n, ks[ki], slack);
                 }
 
-    printf("%zu/%zu cases passed\n", total - fails, total);
+    printf("test_gemm: %zu/%zu cases passed\n", total - fails, total);
     return fails != 0;
 }
