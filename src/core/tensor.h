@@ -27,6 +27,8 @@ pg_tensor *pg_tensor_from_data(size_t ndim, const size_t *shape, const float *da
 pg_tensor *pg_tensor_arange(float start, float stop, float step);
 pg_tensor *pg_tensor_uniform(size_t ndim, const size_t *shape, float low, float high);
 pg_tensor *pg_tensor_normal(size_t ndim, const size_t *shape, float mean, float stddev);
+pg_tensor *pg_tensor_linspace(float start, float stop, size_t num);
+pg_tensor *pg_tensor_eye(size_t n);
 
 pg_tensor *pg_tensor_clone(const pg_tensor *t);
 void pg_tensor_free(pg_tensor *t);

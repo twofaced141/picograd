@@ -154,6 +154,37 @@ pg_tensor *pg_tensor_normal(size_t ndim, const size_t *shape, float mean, float 
     return t;
 }
 
+pg_tensor *pg_tensor_linspace(float start, float stop, size_t num)
+{
+    if (num == 0)
+        return NULL;
+    pg_tensor *t = pg_tensor_new(1, &num);
+    if (!t)
+        return NULL;
+    if (num == 1) {
+        t->data[0] = start;
+        return t;
+    }
+    float step = (stop - start) / (float)(num - 1);
+    for (size_t i = 0; i < num - 1; i++)
+        t->data[i] = start + step * (float)i;
+    t->data[num - 1] = stop;
+    return t;
+}
+
+pg_tensor *pg_tensor_eye(size_t n)
+{
+    if (n == 0)
+        return NULL;
+    size_t shape[2] = {n, n};
+    pg_tensor *t = pg_tensor_new(2, shape);
+    if (!t)
+        return NULL;
+    for (size_t i = 0; i < n; i++)
+        t->data[i * n + i] = 1.0f;
+    return t;
+}
+
 pg_tensor *pg_tensor_clone(const pg_tensor *t)
 {
     assert(t && t->data);
