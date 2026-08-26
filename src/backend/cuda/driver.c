@@ -1,6 +1,7 @@
 #include "driver.h"
 
 #include <dlfcn.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,20 +13,18 @@ typedef struct {
 static pg_cuda_drv g_drv;
 static int g_state = -1;
 
-#define BIND(field) { #field, offsetof(pg_cuda_drv, field) }
-
 static const bind_entry g_binds[] = {
-    BIND(init),
-    BIND(device_get),
-    BIND(ctx_create),
-    BIND(mem_alloc),
-    BIND(mem_free),
-    BIND(memcpy_h2d),
-    BIND(memcpy_d2h),
-    BIND(ctx_sync),
-    BIND(module_load_data),
-    BIND(module_get_function),
-    BIND(launch_kernel),
+    { "cuInit", offsetof(pg_cuda_drv, init) },
+    { "cuDeviceGet", offsetof(pg_cuda_drv, device_get) },
+    { "cuCtxCreate", offsetof(pg_cuda_drv, ctx_create) },
+    { "cuMemAlloc", offsetof(pg_cuda_drv, mem_alloc) },
+    { "cuMemFree", offsetof(pg_cuda_drv, mem_free) },
+    { "cuMemcpyHtoD", offsetof(pg_cuda_drv, memcpy_h2d) },
+    { "cuMemcpyDtoH", offsetof(pg_cuda_drv, memcpy_d2h) },
+    { "cuCtxSynchronize", offsetof(pg_cuda_drv, ctx_sync) },
+    { "cuModuleLoadData", offsetof(pg_cuda_drv, module_load_data) },
+    { "cuModuleGetFunction", offsetof(pg_cuda_drv, module_get_function) },
+    { "cuLaunchKernel", offsetof(pg_cuda_drv, launch_kernel) },
 };
 
 const pg_cuda_drv *pg_cuda_drv_get(pg_status *err)
@@ -38,20 +37,32 @@ const pg_cuda_drv *pg_cuda_drv_get(pg_status *err)
         return NULL;
     }
 
+    int debug = getenv("PG_CUDA_DEBUG") != NULL;
     memset(&g_drv, 0, sizeof(g_drv));
     g_drv.handle = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!g_drv.handle)
+    if (!g_drv.handle) {
+        if (debug)
+            fprintf(stderr, "picograd/cuda: dlopen: %s\n", dlerror());
         goto fail;
+    }
 
     for (size_t i = 0; i < sizeof(g_binds) / sizeof(g_binds[0]); i++) {
         void *sym = dlsym(g_drv.handle, g_binds[i].sym);
-        if (!sym)
-            goto fail;
+        if (!sym) {
+            if (debug)
+                fprintf(stderr, "picograd/cuda: missing %s\n",
+                        g_binds[i].sym);
+            goto fail_unloaded;
+        }
         *(void **)((char *)&g_drv + g_binds[i].offset) = sym;
     }
 
-    if (g_drv.init(0) != 0)
+    int rc = g_drv.init(0);
+    if (rc != 0) {
+        if (debug)
+            fprintf(stderr, "picograd/cuda: cuInit -> %d\n", rc);
         goto fail_unloaded;
+    }
 
     g_state = 0;
     return &g_drv;
