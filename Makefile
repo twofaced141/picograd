@@ -18,14 +18,15 @@ MKLROOT  ?= /opt/intel/oneapi/mkl/latest
 SDE      ?= $(HOME)/tools/sde/sde
 SDE_CPU  ?= -spr
 
-# GPU backend: cpu (default) | cuda
+# GPU backend: cpu (default) | cuda | metal
 # cuda uses CUDA Driver API via dlopen + embedded PTX kernels;
 # no CUDA toolkit is needed to build or run it, only the NVIDIA driver.
+# metal uses Metal.framework (Apple only); on non-Apple it builds as stub.
 BACKEND   ?= cpu
 
 BUILD    := build
 
-SRC      := $(shell find src -name '*.c' -not -path 'src/backend/cuda/*')
+SRC      := $(shell find src -name '*.c' -not -path 'src/backend/cuda/*' -not -path 'src/backend/metal/*')
 ASM      := $(shell find src -name '*.S')
 
 ifeq ($(BACKEND),cuda)
@@ -34,7 +35,17 @@ LDLIBS   += -ldl
 SRC      += $(wildcard src/backend/cuda/*.c)
 endif
 
-OBJ      := $(patsubst %.c,$(BUILD)/%.o,$(SRC)) $(patsubst %.S,$(BUILD)/%.o,$(ASM))
+ifeq ($(BACKEND),metal)
+CPPFLAGS += -DPICOGRAD_BACKEND_METAL
+SRC      += $(wildcard src/backend/metal/*.c)
+ifeq ($(shell uname),Darwin)
+LDLIBS   += -framework Metal -framework Foundation -lobjc
+endif
+endif
+
+OBJ      := $(patsubst %.c,$(BUILD)/%.o,$(filter %.c,$(SRC))) \
+            $(patsubst %.m,$(BUILD)/%.o,$(filter %.m,$(SRC))) \
+            $(patsubst %.S,$(BUILD)/%.o,$(ASM))
 DEP      := $(OBJ:.o=.d)
 
 LIB      := $(BUILD)/libpicograd.a
@@ -45,6 +56,9 @@ BENCH    := $(BUILD)/bench_gemm
 BENCH_GPU :=
 ifeq ($(BACKEND),cuda)
 BENCH_GPU := $(BUILD)/bench_gemm_cuda
+endif
+ifeq ($(BACKEND),metal)
+BENCH_GPU := $(BUILD)/bench_gemm_metal
 endif
 
 .PHONY: all test examples bench bench-gpu test-sde clean
@@ -63,6 +77,10 @@ $(BUILD)/%.o: %.c
 $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.m
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fobjc-arc $(CPPFLAGS) -MMD -MP -c $< -o $@
 
 # tests
 

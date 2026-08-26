@@ -1,9 +1,12 @@
 #include "reduce.h"
 
 #include "common.h"
+#include "../backend/backend.h"
 #include <assert.h>
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 static void out_shape_for(const pg_tensor *t, size_t axis, bool keepdim, size_t *shape)
 {
@@ -56,8 +59,86 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
     return out;
 }
 
+static pg_tensor *try_sum_gpu(const pg_tensor *t, size_t axis, bool keepdim, float scale)
+{
+    if (pg_get_device() == PG_DEV_CPU)
+        return NULL;
+    if (t->numel > UINT_MAX)
+        return NULL;
+    size_t shape[PG_MAX_NDIM];
+    out_shape_for(t, axis, keepdim, shape);
+    size_t ondim = keepdim || t->ndim > 1 ? (keepdim ? t->ndim : t->ndim - 1) : 1;
+    if (ondim > PG_MAX_NDIM)
+        return NULL;
+
+    pg_tensor *out = pg_tensor_new(ondim, shape);
+    if (!out)
+        return NULL;
+    if (out->numel > UINT_MAX)
+        return NULL;
+
+    size_t outer, len, inner;
+    pg_axis_split(t->ndim, t->shape, axis, &outer, &len, &inner);
+    if (outer > UINT_MAX || len > UINT_MAX || inner > UINT_MAX)
+    {
+        pg_tensor_free(out);
+        return NULL;
+    }
+    size_t ostride = keepdim && t->ndim > 1 ? out->stride[axis] : inner;
+    if (ostride > UINT_MAX)
+    {
+        pg_tensor_free(out);
+        return NULL;
+    }
+
+    size_t bytes_src = t->numel * sizeof(float);
+    size_t bytes_out = out->numel * sizeof(float);
+
+    float *da = pg_dev_malloc(bytes_src ? bytes_src : 1);
+    float *dc = pg_dev_malloc(bytes_out ? bytes_out : 1);
+    if (!da || !dc) {
+        if (da) pg_dev_free(da);
+        if (dc) pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_copy_h2d(da, t->data, bytes_src) != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    /* zero device output before accumulation (kernel does out = sum*scale) */
+    /* but kernel writes directly, no need to pre-zero */
+
+    pg_status st = pg_op_sum_axis(dc, da, scale, outer, len, inner, ostride);
+    if (st != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_dev_sync() != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_copy_d2h(out->data, dc, bytes_out) != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    pg_dev_free(da);
+    pg_dev_free(dc);
+    return out;
+}
+
 pg_tensor *pg_sum(const pg_tensor *t, size_t axis, bool keepdim)
 {
+    pg_tensor *g = try_sum_gpu(t, axis, keepdim, 1.0f);
+    if (g) return g;
     return reduce_fold(t, axis, keepdim, f_sum, 0.0f);
 }
 
@@ -75,10 +156,12 @@ pg_tensor *pg_mean(const pg_tensor *t, size_t axis, bool keepdim)
 {
     assert(t && t->data && t->ndim >= 1 && axis < t->ndim);
     size_t len = t->shape[axis];
+    float inv = 1.0f / (float)len;
+    pg_tensor *g = try_sum_gpu(t, axis, keepdim, inv);
+    if (g) return g;
     pg_tensor *out = reduce_fold(t, axis, keepdim, f_sum, 0.0f);
     if (!out)
         return NULL;
-    float inv = 1.0f / (float)len;
     for (size_t i = 0; i < out->numel; i++)
         out->data[i] *= inv;
     return out;

@@ -41,6 +41,10 @@ static const pg_backend_ops *ops_for(pg_devtype dev)
     case PG_DEV_CUDA:
         return &pg_backend_cuda;
 #endif
+#if defined(PICOGRAD_BACKEND_METAL)
+    case PG_DEV_METAL:
+        return &pg_backend_metal;
+#endif
     default:
         return NULL;
     }

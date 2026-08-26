@@ -4,6 +4,8 @@
 #include "common.h"
 #include "elementwise.h"
 #include <assert.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,10 +49,153 @@ static bool prod_dims(const pg_tensor *t, const size_t *dims, size_t ndims, size
     return true;
 }
 
+static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
+{
+    if (pg_get_device() == PG_DEV_CPU)
+        return NULL;
+    /* quick checks for device_limits */
+    if (a->numel > UINT_MAX || b->numel > UINT_MAX)
+        return NULL;
+
+    size_t ra = a->ndim, rb = b->ndim;
+    bool av = ra == 1, bv = rb == 1;
+    if (!bv && a->shape[ra - 1] != b->shape[rb - 2])
+        return NULL;
+    if (a->stride[ra - 1] != 1)
+        return NULL;
+    if (!bv && b->stride[rb - 1] != 1)
+        return NULL;
+
+    size_t am = av ? 1 : a->shape[ra - 2];
+    size_t ak = a->shape[ra - 1];
+    size_t bn = bv ? 1 : b->shape[rb - 1];
+    if (am > UINT_MAX || ak > UINT_MAX || bn > UINT_MAX)
+        return NULL;
+
+    size_t abn = av ? 0 : ra - 2;
+    size_t bbn = bv ? 0 : rb - 2;
+
+    size_t bnd;
+    const size_t *bshape;
+    if (abn == 0 && bbn == 0) {
+        bnd = 0;
+        bshape = NULL;
+    } else if (abn == 0) {
+        bnd = bbn;
+        bshape = b->shape;
+    } else if (bbn == 0) {
+        bnd = abn;
+        bshape = a->shape;
+    } else {
+        if (abn != bbn) return NULL;
+        if (memcmp(a->shape, b->shape, abn * sizeof(size_t)) != 0) return NULL;
+        bnd = abn;
+        bshape = a->shape;
+    }
+
+    size_t nbatch = 1;
+    for (size_t d = 0; d < bnd; d++) {
+        if (bshape[d] > UINT_MAX) return NULL;
+        if (nbatch > SIZE_MAX / bshape[d]) return NULL;
+        nbatch *= bshape[d];
+    }
+
+    size_t rshape[PG_MAX_NDIM], rndim = 0;
+    for (size_t d = 0; d < bnd; d++)
+        rshape[rndim++] = bshape[d];
+    if (!av)
+        rshape[rndim++] = am;
+    if (!bv)
+        rshape[rndim++] = bn;
+    if (rndim == 0)
+        rshape[rndim++] = 1;
+
+    pg_tensor *out = pg_tensor_new(rndim, rshape);
+    if (!out)
+        return NULL;
+    if (out->numel > UINT_MAX) {
+        pg_tensor_free(out);
+        return NULL;
+    }
+
+    /* allocate device buffers for whole tensors */
+    size_t bytes_a = a->numel * sizeof(float);
+    size_t bytes_b = b->numel * sizeof(float);
+    size_t bytes_out = out->numel * sizeof(float);
+    float *da = pg_dev_malloc(bytes_a ? bytes_a : 1);
+    float *db = pg_dev_malloc(bytes_b ? bytes_b : 1);
+    float *dc = pg_dev_malloc(bytes_out ? bytes_out : 1);
+    if (!da || !db || !dc) {
+        if (da) pg_dev_free(da);
+        if (db) pg_dev_free(db);
+        if (dc) pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_copy_h2d(da, a->data, bytes_a) != PG_OK ||
+        pg_copy_h2d(db, b->data, bytes_b) != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(db);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+
+    size_t sa_bat[PG_MAX_NDIM] = {0};
+    size_t sb_bat[PG_MAX_NDIM] = {0};
+    for (size_t d = 0; d < bnd; d++) {
+        if (abn > 0) sa_bat[d] = a->stride[d];
+        if (bbn > 0) sb_bat[d] = b->stride[d];
+    }
+
+    size_t midx[PG_MAX_NDIM] = {0};
+    size_t oa = 0, ob = 0;
+    size_t lda_a = av ? a->stride[ra - 1] : a->stride[ra - 2];
+    size_t ldb_b = bv ? b->stride[rb - 1] : b->stride[rb - 2];
+    for (size_t s = 0; s < nbatch; s++) {
+        pg_gemm(am, bn, ak,
+                da + oa, lda_a,
+                db + ob, ldb_b,
+                dc + s * am * bn, bn);
+        for (size_t d = bnd; d-- > 0;) {
+            midx[d]++;
+            oa += sa_bat[d];
+            ob += sb_bat[d];
+            if (midx[d] < bshape[d])
+                break;
+            midx[d] = 0;
+            oa -= sa_bat[d] * bshape[d];
+            ob -= sb_bat[d] * bshape[d];
+        }
+    }
+
+    if (pg_dev_sync() != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(db);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_copy_d2h(out->data, dc, bytes_out) != PG_OK) {
+        pg_dev_free(da);
+        pg_dev_free(db);
+        pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    pg_dev_free(da);
+    pg_dev_free(db);
+    pg_dev_free(dc);
+    return out;
+}
+
 pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
 {
     assert(a && b && a->data && b->data);
     assert(a->ndim >= 1 && b->ndim >= 1);
+
+    pg_tensor *g = try_matmul_gpu(a, b);
+    if (g) return g;
 
     size_t ra = a->ndim, rb = b->ndim;
     bool av = ra == 1, bv = rb == 1;
@@ -132,12 +277,70 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
     return out;
 }
 
+static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
+{
+    if (pg_get_device() == PG_DEV_CPU)
+        return NULL;
+    if (a->numel > UINT_MAX || b->numel > UINT_MAX)
+        return NULL;
+    size_t batch = a->shape[0];
+    size_t m = a->shape[1];
+    size_t k = a->shape[2];
+    size_t n = b->shape[2];
+    if (m > UINT_MAX || n > UINT_MAX || k > UINT_MAX || batch > UINT_MAX)
+        return NULL;
+    size_t shape[3] = {batch, m, n};
+    pg_tensor *out = pg_tensor_new(3, shape);
+    if (!out) return NULL;
+    if (out->numel > UINT_MAX) { pg_tensor_free(out); return NULL; }
+
+    size_t bytes_a = a->numel * sizeof(float);
+    size_t bytes_b = b->numel * sizeof(float);
+    size_t bytes_out = out->numel * sizeof(float);
+    float *da = pg_dev_malloc(bytes_a ? bytes_a : 1);
+    float *db = pg_dev_malloc(bytes_b ? bytes_b : 1);
+    float *dc = pg_dev_malloc(bytes_out ? bytes_out : 1);
+    if (!da || !db || !dc) {
+        if (da) pg_dev_free(da);
+        if (db) pg_dev_free(db);
+        if (dc) pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_copy_h2d(da, a->data, bytes_a) != PG_OK ||
+        pg_copy_h2d(db, b->data, bytes_b) != PG_OK) {
+        pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    for (size_t s = 0; s < batch; s++)
+        pg_gemm(m, n, k,
+                da + s * m * k, k,
+                db + s * k * n, n,
+                dc + s * m * n, n);
+    if (pg_dev_sync() != PG_OK) {
+        pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    if (pg_copy_d2h(out->data, dc, bytes_out) != PG_OK) {
+        pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+        pg_tensor_free(out);
+        return NULL;
+    }
+    pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+    return out;
+}
+
 pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
 {
     assert(a && b && a->data && b->data);
     assert(a->ndim == 3 && b->ndim == 3);
     assert(a->shape[0] == b->shape[0]);
     assert(a->shape[2] == b->shape[1]);
+
+    pg_tensor *g = try_bmm_gpu(a, b);
+    if (g) return g;
 
     size_t batch = a->shape[0];
     size_t m = a->shape[1];

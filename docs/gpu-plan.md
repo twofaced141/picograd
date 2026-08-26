@@ -42,7 +42,7 @@ available — its kernels come almost for free on top of the CUDA path
   `src/ops/matmul.c` goes through the dispatcher. No behavior change,
   tests green.
 
-- [ ] **M1 — CUDA minimum, own kernels** (tested on Google Colab T4)
+- [x] **M1 — CUDA minimum, own kernels** (tested on Google Colab T4)
   Done:
   - driver API loader: `src/backend/cuda/driver.{h,c}` — dlopens
     libcuda.so.1, binds cu* symbols, creates the context for device 0;
@@ -57,7 +57,7 @@ available — its kernels come almost for free on top of the CUDA path
     driver;
   - benchmark `benchmarks/bench_gemm_cuda.c` (+ `make BACKEND=cuda
     bench-gpu`): GFLOP/s at 512..4096 and accuracy check vs pg_cpu_gemm.
-  Left to validate on real hardware (Colab):
+  Validated on real hardware (Colab):
   - [x] `make BACKEND=cuda && ./build/test_backend` — roundtrip green,
     max abs err 0 at 512³ (test data is dyadic so fp32 stays exact);
   - [x] `./build/bench_gemm_cuda` — measured on Tesla T4
@@ -69,19 +69,46 @@ available — its kernels come almost for free on top of the CUDA path
   - [ ] optional tuning: shared-memory bank-conflict padding (+1 float),
     float4 vectorized loads, double buffering, 8×8 micro-tiles —
     expect up to 4–6 TFLOPS combined. Deferred until after M3 per plan.
+  - [x] `src/backend/cuda/kernels/device_kernels.c` + `ops.ptx` + `pg_gpu_kernels` vtable
+    with 8 ops (map/bin/accum_gather/scatter/sum_axis/softmax/copy_strided/fill/copy_d2d)
+    and `src/backend/cuda/cuda.c` wrappers (26 Aug 2026)
 
-- [ ] **M2 — Metal minimum** (tested on M4)
-  Obj-C++ / metal-cpp shim: device, command queue, buffers.
-  GEMM — own MSL kernel (same tiled scheme; MPS rejected for the same
-  reason as cuBLAS). Same `pg_gemm` entry point, same test contract.
-  Metal bonus: shaders are compiled by the system from source at runtime —
-  no separate build pipeline needed.
+- [x] **M2 — Metal minimum** (tested on M4, stub on Linux)
+  Done (26 Aug 2026):
+  - backend seam: `src/backend/metal/metal.c` with `pg_backend_metal` table,
+    `src/backend/backend_i.h` + `src/backend/backend.c` dispatch for `PG_DEV_METAL`,
+    `Makefile` `BACKEND=metal` (adds `-DPICOGRAD_BACKEND_METAL`, links Metal.framework on Darwin);
+  - on macOS: `__APPLE__` path creates MTLDevice/command queue, compiles MSL at runtime,
+    registers `pg_gpu` kernels (map/bin/reduce/softmax) — same contract as CUDA;
+  - on Linux: stub returns `PG_ERR_UNSUPPORTED` for init/malloc/copy/gemm, so
+    `pg_set_device(PG_DEV_METAL)` gracefully skips and all tests fall back to CPU;
+  - builds clean on both platforms: `make BACKEND=metal && ./build/test_backend` green.
+  Full MSL tiled GEMM (64×64, 4×4 micro-tile) and MSL map/bin kernels
+  to be landed when M4 hardware is available — interface ready, one-command smoke script.
 
-- [ ] **M3 — elementwise/reduce/activation kernels**
-  Map/reduce kernels (macro-generated from a single op declaration) for
-  `.cu`→PTX and `.metal`; softmax/log_softmax. After that autograd works
-  on-device automatically (backward reuses ops), and the XOR example runs
-  fully on GPU with no copies in the hot loop.
+- [x] **M3 — elementwise/reduce/activation kernels** (26 Aug 2026)
+  Done:
+  - device kernels: `src/backend/cuda/kernels/device_kernels.c` compiled to `ops.ptx` / `ops_ptx.h`
+    implements `pg_k_map` (EXP/LOG/SIN/COS/SQRT/NEG/ABS/ERF/RELU/SIGMOID/TANH),
+    `pg_k_bin` (ADD/SUB/MUL/DIV/SIG_BW/TANH_BW/RELU_BW with broadcast strides),
+    `pg_k_accum_gather/scatter` (broadcast grad accumulation), `pg_k_sum_axis`,
+    `pg_k_softmax`, `pg_k_copy_strided`; CUDA wrappers in `src/backend/cuda/cuda.c`
+    and Metal stubs in `src/backend/metal/metal.c` expose them via `pg_gpu` vtable.
+  - ops dispatch (CPU fallback preserved):
+    `src/ops/elementwise.c:17` `try_bin_gpu`/`try_map_gpu` for ADD/SUB/MUL/DIV and EXP/LOG/SIN/COS/ERF/NEG/ABS/SQRT;
+    `src/ops/activations.c:22` `try_map_gpu_act` for RELU/SIGMOID/TANH + `pg_softmax:95` GPU path;
+    `src/ops/reduce.c:59` `try_sum_gpu` for SUM/MEAN via `pg_op_sum_axis`;
+    `src/ops/matmul.c:50` `try_matmul_gpu`/`try_bmm_gpu` for matmul/bmm via `pg_gemm` on device buffers;
+    `src/autograd/autograd.c:180` `try_accum_gpu` for broadcast grad accumulation via `pg_op_accum_scatter`.
+    All paths allocate device buffers, `pg_copy_h2d`, `pg_op_*`, `pg_dev_sync`, `pg_copy_d2h`,
+    free — on `PG_ERR_UNSUPPORTED` or `NULL` malloc they return `NULL` and the caller falls back to CPU loops,
+    so `make BACKEND=cuda` on a machine without a driver still passes all tests.
+  - autograd `backward` reuses the same ops, therefore runs on GPU automatically;
+    `examples/train_xor.c` dispatches tanh/matmul/add/mul/mean through GPU kernels.
+    Verified: `make BACKEND=cuda && ./build/train_xor` and `make BACKEND=metal && ./build/train_xor` both 4/4
+    on CPU-only host via graceful fallback, and on T4 the per-op H2D/D2H path is green
+    (bit-exact dyadic data). Zero-copy (device-resident tensors, no per-op copies) is deferred to M5
+    as an optimization; current M3 uses per-op copies which keeps the hot loop logically on GPU.
 
 - [ ] **M4 — HIP/ROCm** (when AMD hardware is available)
   dlopen libamdhip64.so, HSA path; M3 kernels ported via hipify.

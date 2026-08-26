@@ -1,5 +1,6 @@
 #include "autograd.h"
 
+#include "../backend/backend.h"
 #include "../backend/cpu/gemm.h"
 #include "../ops/activations.h"
 #include "../ops/elementwise.h"
@@ -7,6 +8,7 @@
 #include "../ops/reduce.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -177,6 +179,121 @@ static void ensure_grad(pg_node *n)
     assert(n->grad);
 }
 
+static bool try_accum_gpu(pg_tensor *dg, const pg_tensor *g, float scale)
+{
+    if (pg_get_device() == PG_DEV_CPU)
+        return false;
+    if (dg->numel > UINT_MAX || g->numel > UINT_MAX)
+        return false;
+    if (g->ndim > PG_MAX_OP_NDIM || dg->ndim > PG_MAX_OP_NDIM)
+        return false;
+
+    /* fast path: shapes equal -> simple scaled add via bin? Use accum_scatter with identity */
+    if (pg_shape_equal(dg->ndim, dg->shape, g->ndim, g->shape)) {
+        /* For equal shapes we can use a plain scaled add loop on GPU via bin+scale?
+         * Instead do direct device elementwise: dg += scale * g
+         * We can use pg_op_bin with MUL to compute scale*g then ADD, but that needs extra buffer.
+         * Simpler: use accum_scatter with identity mapping (s = stride).
+         */
+        pg_k_strides ar;
+        memset(&ar, 0, sizeof(ar));
+        ar.ndim = (unsigned)g->ndim;
+        ar.numel = (unsigned)g->numel;
+        for (size_t d = 0; d < g->ndim; d++) {
+            if (g->shape[d] > UINT_MAX || dg->stride[d] > UINT_MAX)
+                return false;
+            ar.shape[d] = (unsigned)g->shape[d];
+            ar.s[d] = (unsigned)dg->stride[d];
+        }
+        /* But for equal contiguous case, dg->stride equals g->stride, so this works.
+         * For general strides (should be contiguous for grad), it still works. */
+        size_t bytes_dg = dg->numel * sizeof(float);
+        size_t bytes_g = g->numel * sizeof(float);
+        float *d_dg = pg_dev_malloc(bytes_dg ? bytes_dg : 1);
+        float *d_g = pg_dev_malloc(bytes_g ? bytes_g : 1);
+        if (!d_dg || !d_g) {
+            if (d_dg) pg_dev_free(d_dg);
+            if (d_g) pg_dev_free(d_g);
+            return false;
+        }
+        if (pg_copy_h2d(d_g, g->data, bytes_g) != PG_OK ||
+            pg_copy_h2d(d_dg, dg->data, bytes_dg) != PG_OK) {
+            pg_dev_free(d_dg); pg_dev_free(d_g);
+            return false;
+        }
+        /* reuse accum_scatter: dst = dg, src = g */
+        pg_status st = pg_op_accum_scatter(d_dg, d_g, scale, &ar);
+        if (st != PG_OK) {
+            pg_dev_free(d_dg); pg_dev_free(d_g);
+            return false;
+        }
+        if (pg_dev_sync() != PG_OK) {
+            pg_dev_free(d_dg); pg_dev_free(d_g);
+            return false;
+        }
+        if (pg_copy_d2h(dg->data, d_dg, bytes_dg) != PG_OK) {
+            pg_dev_free(d_dg); pg_dev_free(d_g);
+            return false;
+        }
+        pg_dev_free(d_dg); pg_dev_free(d_g);
+        return true;
+    }
+
+    /* broadcast case */
+    size_t off = g->ndim - dg->ndim;
+    size_t proj[PG_MAX_NDIM];
+    for (size_t d = 0; d < g->ndim; d++) {
+        if (d < off) {
+            proj[d] = 0;
+            continue;
+        }
+        size_t j = d - off;
+        if (dg->shape[j] > UINT_MAX || dg->stride[j] > UINT_MAX)
+            return false;
+        proj[d] = dg->shape[j] == 1 ? 0 : dg->stride[j];
+        if (proj[d] > UINT_MAX) return false;
+    }
+    pg_k_strides ar;
+    memset(&ar, 0, sizeof(ar));
+    ar.ndim = (unsigned)g->ndim;
+    ar.numel = (unsigned)g->numel;
+    for (size_t d = 0; d < g->ndim; d++) {
+        if (g->shape[d] > UINT_MAX) return false;
+        ar.shape[d] = (unsigned)g->shape[d];
+        ar.s[d] = (unsigned)proj[d];
+    }
+
+    size_t bytes_dg = dg->numel * sizeof(float);
+    size_t bytes_g = g->numel * sizeof(float);
+    float *d_dg = pg_dev_malloc(bytes_dg ? bytes_dg : 1);
+    float *d_g = pg_dev_malloc(bytes_g ? bytes_g : 1);
+    if (!d_dg || !d_g) {
+        if (d_dg) pg_dev_free(d_dg);
+        if (d_g) pg_dev_free(d_g);
+        return false;
+    }
+    if (pg_copy_h2d(d_g, g->data, bytes_g) != PG_OK ||
+        pg_copy_h2d(d_dg, dg->data, bytes_dg) != PG_OK) {
+        pg_dev_free(d_dg); pg_dev_free(d_g);
+        return false;
+    }
+    pg_status st = pg_op_accum_scatter(d_dg, d_g, scale, &ar);
+    if (st != PG_OK) {
+        pg_dev_free(d_dg); pg_dev_free(d_g);
+        return false;
+    }
+    if (pg_dev_sync() != PG_OK) {
+        pg_dev_free(d_dg); pg_dev_free(d_g);
+        return false;
+    }
+    if (pg_copy_d2h(dg->data, d_dg, bytes_dg) != PG_OK) {
+        pg_dev_free(d_dg); pg_dev_free(d_g);
+        return false;
+    }
+    pg_dev_free(d_dg); pg_dev_free(d_g);
+    return true;
+}
+
 static void accum(pg_node *dst, const pg_tensor *g, float scale)
 {
     if (!dst->requires_grad || !g)
@@ -185,6 +302,9 @@ static void accum(pg_node *dst, const pg_tensor *g, float scale)
     ensure_grad(dst);
     pg_tensor *dg = dst->grad;
     assert(g->ndim >= dg->ndim);
+
+    if (try_accum_gpu(dg, g, scale))
+        return;
 
     if (pg_shape_equal(dg->ndim, dg->shape, g->ndim, g->shape)) {
         for (size_t i = 0; i < dg->numel; i++)
