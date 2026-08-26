@@ -30,6 +30,8 @@ const pg_backend_ops pg_backend_cpu = {
 
 static pg_devtype g_device = PG_DEV_CPU;
 
+pg_gpu_kernels pg_gpu;
+
 static const pg_backend_ops *ops_for(pg_devtype dev)
 {
     switch (dev) {
@@ -116,4 +118,74 @@ void pg_gemm(size_t m, size_t n, size_t k,
     }
 
     pg_cpu_gemm(m, n, k, a, lda, b, ldb, c, ldc);
+}
+
+pg_status pg_op_map(float *out, const float *src, size_t n, int op)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.map)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.map(out, src, n, op);
+}
+
+pg_status pg_op_bin(float *out, const float *a, const float *b, size_t n,
+                    int op, const pg_k_bin_args *args)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.bin)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.bin(out, a, b, n, op, args);
+}
+
+pg_status pg_op_accum_gather(float *dst, const float *src, float scale,
+                             const pg_k_strides *args)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.accum_gather)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.accum_gather(dst, src, scale, args);
+}
+
+pg_status pg_op_accum_scatter(float *dst, const float *src, float scale,
+                              const pg_k_strides *args)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.accum_scatter)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.accum_scatter(dst, src, scale, args);
+}
+
+pg_status pg_op_sum_axis(float *out, const float *src, float scale,
+                         size_t outer, size_t len, size_t inner,
+                         size_t ostride)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.sum_axis)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.sum_axis(out, src, scale, outer, len, inner, ostride);
+}
+
+pg_status pg_op_softmax(float *out, const float *src, size_t outer,
+                        size_t len, size_t inner)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.softmax)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.softmax(out, src, outer, len, inner);
+}
+
+pg_status pg_op_copy_strided(float *dst, const float *src,
+                             const pg_k_strides *args)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.copy_strided)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.copy_strided(dst, src, args);
+}
+
+pg_status pg_op_fill(void *p, size_t nbytes, float v)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.fill)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.fill(p, nbytes, v);
+}
+
+pg_status pg_op_copy_d2d(void *dst, const void *src, size_t nbytes)
+{
+    if (g_device == PG_DEV_CPU || !pg_gpu.copy_d2d)
+        return PG_ERR_UNSUPPORTED;
+    return pg_gpu.copy_d2d(dst, src, nbytes);
 }

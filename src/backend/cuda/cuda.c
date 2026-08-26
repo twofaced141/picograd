@@ -2,6 +2,7 @@
 #include "driver.h"
 
 #include "sgemm_ptx.h"
+#include "ops_ptx.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -9,10 +10,21 @@
 
 #define BTILE 64
 #define TPT 16
+#define PG_CUDA_THREADS 256
 
 static void *g_ctx;
 static void *g_module;
 static void *g_fn_sgemm;
+static void *g_ops_module;
+static void *g_fn_map;
+static void *g_fn_bin;
+static void *g_fn_accum_gather;
+static void *g_fn_accum_scatter;
+static void *g_fn_sum_axis;
+static void *g_fn_softmax;
+static void *g_fn_copy_strided;
+
+static void cuda_register_gpu(void);
 
 static pg_status cuda_init(void)
 {
@@ -37,6 +49,25 @@ static pg_status cuda_init(void)
         return cached = PG_ERR_GEMM;
     if (drv->module_get_function(&g_fn_sgemm, g_module, "pg_sgemm_kernel") != 0)
         return cached = PG_ERR_GEMM;
+
+    if (drv->module_load_data(&g_ops_module, ops_ptx) != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_map, g_ops_module, "pg_k_map") != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_bin, g_ops_module, "pg_k_bin") != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_accum_gather, g_ops_module, "pg_k_accum_gather") != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_accum_scatter, g_ops_module, "pg_k_accum_scatter") != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_sum_axis, g_ops_module, "pg_k_sum_axis") != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_softmax, g_ops_module, "pg_k_softmax") != 0)
+        return cached = PG_ERR_GEMM;
+    if (drv->module_get_function(&g_fn_copy_strided, g_ops_module, "pg_k_copy_strided") != 0)
+        return cached = PG_ERR_GEMM;
+
+    cuda_register_gpu();
 
     cached = PG_OK;
     return cached;
@@ -110,6 +141,127 @@ static void cuda_gemm(size_t m, size_t n, size_t k,
     int rc = pg_cuda_drv_get(NULL)->launch_kernel(
         g_fn_sgemm, gx, gy, 1, TPT, TPT, 1, 0, NULL, params, NULL);
     assert(rc == 0);
+}
+
+static pg_status cuda_gpu_map(float *out, const float *src, size_t n, int op)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    unsigned n32 = (unsigned)n;
+    unsigned op32 = (unsigned)op;
+    void *params[] = { &out, &src, &n32, &op32 };
+    unsigned gx = ((unsigned)n + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_map, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_bin(float *out, const float *a, const float *b,
+                               size_t n, int op, const pg_k_bin_args *args)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    unsigned op32 = (unsigned)op;
+    void *params[] = { &out, &a, &b, &op32, (void *)args };
+    unsigned gx = ((unsigned)n + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_bin, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_accum_gather(float *dst, const float *src,
+                                        float scale, const pg_k_strides *args)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    uint32_t scale_bits;
+    memcpy(&scale_bits, &scale, sizeof scale_bits);
+    void *params[] = { &dst, &src, &scale_bits, (void *)args };
+    unsigned gx = ((unsigned)args->numel + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_accum_gather, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_accum_scatter(float *dst, const float *src,
+                                         float scale, const pg_k_strides *args)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    uint32_t scale_bits;
+    memcpy(&scale_bits, &scale, sizeof scale_bits);
+    void *params[] = { &dst, &src, &scale_bits, (void *)args };
+    unsigned gx = ((unsigned)args->numel + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_accum_scatter, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_sum_axis(float *out, const float *src, float scale,
+                                    size_t outer, size_t len, size_t inner,
+                                    size_t keepdim_stride)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    uint32_t scale_bits;
+    memcpy(&scale_bits, &scale, sizeof scale_bits);
+    unsigned o32 = (unsigned)outer, l32 = (unsigned)len, i32 = (unsigned)inner;
+    unsigned ks32 = (unsigned)keepdim_stride;
+    void *params[] = { &out, &src, &scale_bits, &o32, &l32, &i32, &ks32 };
+    unsigned gx = ((unsigned)(outer * inner) + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_sum_axis, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_softmax(float *out, const float *src,
+                                   size_t outer, size_t len, size_t inner)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    unsigned o32 = (unsigned)outer, l32 = (unsigned)len, i32 = (unsigned)inner;
+    void *params[] = { &out, &src, &o32, &l32, &i32 };
+    unsigned gx = ((unsigned)(outer * inner) + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_softmax, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_copy_strided(float *dst, const float *src,
+                                        const pg_k_strides *args)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_GEMM;
+    void *params[] = { &dst, &src, (void *)args };
+    unsigned gx = ((unsigned)args->numel + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
+    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
+        g_fn_copy_strided, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
+    return rc == 0 ? PG_OK : PG_ERR_GEMM;
+}
+
+static pg_status cuda_gpu_fill(void *p, size_t nbytes, float v)
+{
+    if (cuda_init() != PG_OK)
+        return PG_ERR_COPY;
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    unsigned long long d = (unsigned long long)(uintptr_t)p;
+    return pg_cuda_drv_get(NULL)->memset_u32(d, bits, nbytes / 4) == 0
+               ? PG_OK
+               : PG_ERR_COPY;
+}
+
+static void cuda_register_gpu(void)
+{
+    pg_gpu.map          = cuda_gpu_map;
+    pg_gpu.bin          = cuda_gpu_bin;
+    pg_gpu.accum_gather  = cuda_gpu_accum_gather;
+    pg_gpu.accum_scatter = cuda_gpu_accum_scatter;
+    pg_gpu.sum_axis     = cuda_gpu_sum_axis;
+    pg_gpu.softmax      = cuda_gpu_softmax;
+    pg_gpu.copy_strided = cuda_gpu_copy_strided;
+    pg_gpu.fill         = cuda_gpu_fill;
+    pg_gpu.copy_d2d     = NULL;
 }
 
 const pg_backend_ops pg_backend_cuda = {

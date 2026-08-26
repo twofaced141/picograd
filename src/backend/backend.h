@@ -26,6 +26,73 @@ typedef enum {
 pg_status pg_set_device(pg_devtype dev);
 pg_devtype pg_get_device(void);
 
+#define PG_MAX_OP_NDIM 8
+
+typedef enum {
+    PG_MAP_EXP = 0,
+    PG_MAP_LOG,
+    PG_MAP_SIN,
+    PG_MAP_COS,
+    PG_MAP_SQRT,
+    PG_MAP_NEG,
+    PG_MAP_ABS,
+    PG_MAP_ERF,
+    PG_MAP_RELU,
+    PG_MAP_SIGMOID,
+    PG_MAP_TANH,
+} pg_map_op;
+
+typedef enum {
+    PG_BIN_ADD = 0,
+    PG_BIN_SUB,
+    PG_BIN_MUL,
+    PG_BIN_DIV,
+    PG_BIN_SIG_BW,
+    PG_BIN_TANH_BW,
+    PG_BIN_RELU_BW,
+} pg_bin_op;
+
+typedef struct {
+    unsigned ndim;
+    unsigned numel;
+    unsigned shape[PG_MAX_OP_NDIM];
+} pg_k_shape;
+
+typedef struct {
+    unsigned ndim;
+    unsigned numel;
+    unsigned shape[PG_MAX_OP_NDIM];
+    unsigned sa[PG_MAX_OP_NDIM];
+    unsigned sb[PG_MAX_OP_NDIM];
+} pg_k_bin_args;
+
+typedef struct {
+    unsigned ndim;
+    unsigned numel;
+    unsigned shape[PG_MAX_OP_NDIM];
+    unsigned s[PG_MAX_OP_NDIM];
+} pg_k_strides;
+
+#define PG_MAX_NDIM_K PG_MAX_OP_NDIM
+
+pg_status pg_op_fill(void *p, size_t nbytes, float v);
+pg_status pg_op_copy_d2d(void *dst, const void *src, size_t nbytes);
+
+pg_status pg_op_map(float *out, const float *src, size_t n, int op);
+pg_status pg_op_bin(float *out, const float *a, const float *b,
+                    size_t n, int op, const pg_k_bin_args *args);
+pg_status pg_op_accum_gather(float *dst, const float *src, float scale,
+                             const pg_k_strides *args);
+pg_status pg_op_accum_scatter(float *dst, const float *src, float scale,
+                              const pg_k_strides *args);
+pg_status pg_op_sum_axis(float *out, const float *src, float scale,
+                         size_t outer, size_t len, size_t inner,
+                         size_t keepdim_stride);
+pg_status pg_op_softmax(float *out, const float *src,
+                        size_t outer, size_t len, size_t inner);
+pg_status pg_op_copy_strided(float *dst, const float *src,
+                             const pg_k_strides *args);
+
 void *pg_dev_malloc(size_t nbytes);
 void pg_dev_free(void *p);
 

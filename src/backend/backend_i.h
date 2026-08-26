@@ -23,4 +23,23 @@ extern const pg_backend_ops pg_backend_cpu;
 extern const pg_backend_ops pg_backend_cuda;
 #endif
 
+/* device kernel entry points, registered by the active gpu backend */
+typedef struct pg_gpu_kernels {
+    pg_status (*map)(float *, const float *, size_t, int);
+    pg_status (*bin)(float *, const float *, const float *, size_t, int,
+                     const pg_k_bin_args *);
+    pg_status (*accum_gather)(float *, const float *, float,
+                              const pg_k_strides *);
+    pg_status (*accum_scatter)(float *, const float *, float,
+                               const pg_k_strides *);
+    pg_status (*sum_axis)(float *, const float *, float, size_t, size_t,
+                          size_t, size_t);
+    pg_status (*softmax)(float *, const float *, size_t, size_t, size_t);
+    pg_status (*copy_strided)(float *, const float *, const pg_k_strides *);
+    pg_status (*fill)(void *, size_t, float);
+    pg_status (*copy_d2d)(void *, const void *, size_t);
+} pg_gpu_kernels;
+
+extern pg_gpu_kernels pg_gpu;
+
 #endif

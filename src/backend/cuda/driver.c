@@ -21,6 +21,8 @@ static const bind_entry g_binds[] = {
     { "cuMemFree", offsetof(pg_cuda_drv, mem_free) },
     { "cuMemcpyHtoD", offsetof(pg_cuda_drv, memcpy_h2d) },
     { "cuMemcpyDtoH", offsetof(pg_cuda_drv, memcpy_d2h) },
+    { "cuMemcpyDtoD", offsetof(pg_cuda_drv, memcpy_d2d) },
+    { "cuMemsetD32", offsetof(pg_cuda_drv, memset_u32) },
     { "cuCtxSynchronize", offsetof(pg_cuda_drv, ctx_sync) },
     { "cuModuleLoadData", offsetof(pg_cuda_drv, module_load_data) },
     { "cuModuleGetFunction", offsetof(pg_cuda_drv, module_get_function) },

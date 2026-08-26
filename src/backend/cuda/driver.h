@@ -14,6 +14,9 @@ typedef struct pg_cuda_drv {
     int (*mem_free)(unsigned long long dptr);
     int (*memcpy_h2d)(unsigned long long dst, const void *src, size_t nbytes);
     int (*memcpy_d2h)(void *dst, unsigned long long src, size_t nbytes);
+    int (*memcpy_d2d)(unsigned long long dst, unsigned long long src,
+                      size_t nbytes);
+    int (*memset_u32)(unsigned long long dst, unsigned value, size_t count);
     int (*ctx_sync)(void);
     int (*module_load_data)(void **module, const void *image);
     int (*module_get_function)(void **func, void *module, const char *name);
