@@ -6,13 +6,17 @@ AR       ?= ar
 CFLAGS   ?= -O2 -g
 CFLAGS   += -std=c11 -Wall -Wextra -mavx2 -fno-fast-math
 CPPFLAGS += -Isrc -D_POSIX_C_SOURCE=200809L
-ASFLAGS  += -mavx2
+ASFLAGS  += -mavx2 -mavx512f
 
 LDFLAGS  +=
 LDLIBS   += -lm
 
 # MKL for benchmarks (Intel oneAPI)
 MKLROOT  ?= /opt/intel/oneapi/mkl/latest
+
+# Intel SDE for testing AVX-512 kernels on CPUs without them
+SDE      ?= $(HOME)/tools/sde/sde
+SDE_CPU  ?= -spr
 
 BUILD    := build
 
@@ -26,7 +30,7 @@ LIB      := $(BUILD)/libpicograd.a
 TESTS    := $(patsubst tests/%.c,$(BUILD)/%,$(wildcard tests/*.c))
 BENCH    := $(BUILD)/bench_gemm
 
-.PHONY: all test bench clean
+.PHONY: all test bench test-sde clean
 
 all: $(LIB) $(TESTS)
 
@@ -50,6 +54,10 @@ $(BUILD)/test_%: tests/test_%.c $(LIB)
 
 test: $(TESTS)
 	@for t in $(TESTS); do ./$$t || exit 1; done
+
+# run tests under Intel SDE (emulates AVX-512 on CPUs without it)
+test-sde: $(TESTS)
+	@for t in $(TESTS); do $(SDE) $(SDE_CPU) -- ./$$t || exit 1; done
 
 # benchmark (requires MKL)
 

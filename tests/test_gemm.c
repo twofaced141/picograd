@@ -8,6 +8,17 @@ extern void sgemm_avx2_micro(size_t k,
                              const float *b, size_t ldb,
                              float *c, size_t ldc,
                              size_t m, size_t n);
+extern void sgemm_avx512_micro(size_t k,
+                               const float *a, size_t lda,
+                               const float *b, size_t ldb,
+                               float *c, size_t ldc,
+                               size_t m, size_t n);
+
+typedef void (*gemm_micro_fn)(size_t k,
+                              const float *a, size_t lda,
+                              const float *b, size_t ldb,
+                              float *c, size_t ldc,
+                              size_t m, size_t n);
 
 #define GUARD 16
 #define TOL   1e-3f
@@ -37,6 +48,7 @@ static void ref_gemm(size_t m, size_t n, size_t k,
 }
 
 static int g_details;
+static gemm_micro_fn g_micro;
 
 static int check_case(size_t m, size_t n, size_t k, int slack)
 {
@@ -67,7 +79,7 @@ static int check_case(size_t m, size_t n, size_t k, int slack)
     for (size_t i = 0; i < m; i++)
         memcpy(c + i * ldc, c0 + i * ldc, n * sizeof(float));
 
-    sgemm_avx2_micro(k, a, lda, b, ldb, c, ldc, m, n);
+    g_micro(k, a, lda, b, ldb, c, ldc, m, n);
 
     int fail = 0;
     for (size_t i = 0; i < m && !fail; i++) {
@@ -88,7 +100,9 @@ static int check_case(size_t m, size_t n, size_t k, int slack)
 
     if (fail && g_details < 5) {
         g_details++;
-        printf("FAIL m=%zu n=%zu k=%zu slack=%d (%s)\n", m, n, k, slack,
+        printf("FAIL %s m=%zu n=%zu k=%zu slack=%d (%s)\n",
+               g_micro == sgemm_avx2_micro ? "avx2" : "avx512",
+               m, n, k, slack,
                fail == 2 ? "canary overwritten" : "value mismatch");
         for (size_t i = 0; i < m; i++) {
             for (size_t j = 0; j < n; j++)
@@ -104,15 +118,41 @@ static int check_case(size_t m, size_t n, size_t k, int slack)
 int main(void)
 {
     static const size_t ks[] = { 0, 1, 2, 3, 4, 5, 7, 8, 9, 13, 16, 33 };
+    struct {
+        const char *name;
+        gemm_micro_fn fn;
+        size_t nr;
+    } kernels[] = {
+        { "avx2",   sgemm_avx2_micro,   8 },
+#if defined(__x86_64__) || defined(__i386__)
+        { "avx512", sgemm_avx512_micro, 16 },
+#endif
+    };
+    size_t n_kernels = sizeof(kernels) / sizeof(kernels[0]);
+    int has_avx512 = 0;
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_cpu_init();
+    has_avx512 = __builtin_cpu_supports("avx512f") != 0;
+#endif
+
     size_t total = 0, fails = 0;
 
-    for (int slack = 0; slack <= 1; slack++)
-        for (size_t ki = 0; ki < sizeof(ks) / sizeof(ks[0]); ki++)
-            for (size_t m = 1; m <= 8; m++)
-                for (size_t n = 1; n <= 8; n++) {
-                    total++;
-                    fails += check_case(m, n, ks[ki], slack);
-                }
+    for (size_t kn = 0; kn < n_kernels; kn++) {
+        if (kn == 1 && !has_avx512) {
+            printf("test_gemm: skipping avx512 (not supported by cpu)\n");
+            continue;
+        }
+        g_micro = kernels[kn].fn;
+        for (int slack = 0; slack <= 1; slack++)
+            for (size_t ki = 0; ki < sizeof(ks) / sizeof(ks[0]); ki++)
+                for (size_t m = 1; m <= 8; m++)
+                    for (size_t n = 1; n <= kernels[kn].nr; n++) {
+                        total++;
+                        fails += check_case(m, n, ks[ki], slack);
+                    }
+        printf("test_gemm[%s]: %s\n", kernels[kn].name,
+               fails == 0 ? "all cases passed" : "FAILURES");
+    }
 
     printf("test_gemm: %zu/%zu cases passed\n", total - fails, total);
     return fails != 0;
