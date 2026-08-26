@@ -61,12 +61,14 @@ available — its kernels come almost for free on top of the CUDA path
   - [x] `make BACKEND=cuda && ./build/test_backend` — roundtrip green,
     max abs err 0 at 512³ (test data is dyadic so fp32 stays exact);
   - [x] `./build/bench_gemm_cuda` — measured on Tesla T4
-    (driver 580.82.07): 638 GFLOP/s @512, 621 @1024, 701 @2048,
-    844 @4096 → ~8–10% of the 8.1 TFLOPS fp32 peak, launch overhead
-    visible at small sizes;
-  - [ ] optional tuning: register blocking (TM×TN micro-tiles per thread)
-    should cut shared-memory traffic ~TILE-fold; expect 3–6 TFLOPS.
-    Deferred until after M3 per plan.
+    (driver 580.82.07), Tesla T4 fp32 peak ~8.1 TFLOPS:
+    - v1 (naive tiled 32×32, 1 output/thread): 638–844 GFLOP/s (~8–10%)
+    - v2 (register-blocked 64×64 tiles, 4×4/thread): 1539 @512,
+      2118 @1024, 2346 @2048, 2540 @4096 → ~19–31% of peak;
+    both versions bit-exact against pg_cpu_gemm (dyadic test data).
+  - [ ] optional tuning: shared-memory bank-conflict padding (+1 float),
+    float4 vectorized loads, double buffering, 8×8 micro-tiles —
+    expect up to 4–6 TFLOPS combined. Deferred until after M3 per plan.
 
 - [ ] **M2 — Metal minimum** (tested on M4)
   Obj-C++ / metal-cpp shim: device, command queue, buffers.
