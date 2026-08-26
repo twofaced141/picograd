@@ -1,0 +1,731 @@
+#include "autograd.h"
+
+#include "../backend/cpu/gemm.h"
+#include "../ops/activations.h"
+#include "../ops/elementwise.h"
+#include "../ops/matmul.h"
+#include "../ops/reduce.h"
+
+#include <assert.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+static pg_node *node_wrap(pg_tensor *t, bool requires_grad)
+{
+    pg_node *n = calloc(1, sizeof(*n));
+    if (!n) {
+        pg_tensor_free(t);
+        return NULL;
+    }
+    n->value = t;
+    n->requires_grad = requires_grad;
+    n->refs = 1;
+    return n;
+}
+
+static pg_node *attach(pg_tensor *value, size_t nparents, pg_node **parents,
+                       void (*backward)(pg_node *), void *ctx)
+{
+    pg_node *n = calloc(1, sizeof(*n));
+    if (!n) {
+        pg_tensor_free(value);
+        free(ctx);
+        return NULL;
+    }
+    n->value = value;
+    n->backward = backward;
+    n->ctx = ctx;
+    n->refs = 1;
+
+    if (nparents) {
+        n->parents = malloc(nparents * sizeof(*n->parents));
+        if (!n->parents) {
+            free(n);
+            pg_tensor_free(value);
+            free(ctx);
+            return NULL;
+        }
+        for (size_t i = 0; i < nparents; i++) {
+            n->parents[i] = parents[i];
+            pg_node_retain(parents[i]);
+            n->requires_grad |= parents[i]->requires_grad;
+        }
+        n->nparents = nparents;
+    }
+    return n;
+}
+
+static pg_node *var_leaf(size_t ndim, const size_t *shape, bool requires_grad,
+                         pg_tensor *(*make)(size_t, const size_t *))
+{
+    pg_tensor *t = make(ndim, shape);
+    if (!t)
+        return NULL;
+    return node_wrap(t, requires_grad);
+}
+
+pg_node *pg_var_from_data(size_t ndim, const size_t *shape, const float *data,
+                          bool requires_grad)
+{
+    pg_tensor *t = pg_tensor_from_data(ndim, shape, data);
+    if (!t)
+        return NULL;
+    return node_wrap(t, requires_grad);
+}
+
+pg_node *pg_var_from_tensor(const pg_tensor *t, bool requires_grad)
+{
+    if (!t)
+        return NULL;
+    return pg_var_from_data(t->ndim, t->shape, t->data, requires_grad);
+}
+
+pg_node *pg_var_zeros(size_t ndim, const size_t *shape, bool requires_grad)
+{
+    return var_leaf(ndim, shape, requires_grad, pg_tensor_zeros);
+}
+
+pg_node *pg_var_ones(size_t ndim, const size_t *shape, bool requires_grad)
+{
+    return var_leaf(ndim, shape, requires_grad, pg_tensor_ones);
+}
+
+pg_node *pg_var_full(size_t ndim, const size_t *shape, float value,
+                     bool requires_grad)
+{
+    pg_tensor *t = pg_tensor_full(ndim, shape, value);
+    if (!t)
+        return NULL;
+    return node_wrap(t, requires_grad);
+}
+
+pg_node *pg_var_uniform(size_t ndim, const size_t *shape, float low, float high,
+                        bool requires_grad)
+{
+    pg_tensor *t = pg_tensor_uniform(ndim, shape, low, high);
+    if (!t)
+        return NULL;
+    return node_wrap(t, requires_grad);
+}
+
+pg_node *pg_var_normal(size_t ndim, const size_t *shape, float mean,
+                       float stddev, bool requires_grad)
+{
+    pg_tensor *t = pg_tensor_normal(ndim, shape, mean, stddev);
+    if (!t)
+        return NULL;
+    return node_wrap(t, requires_grad);
+}
+
+pg_node *pg_var_scalar(float value, bool requires_grad)
+{
+    return pg_var_full(1, (size_t[]){1}, value, requires_grad);
+}
+
+pg_node *pg_node_retain(pg_node *n)
+{
+    if (n)
+        n->refs++;
+    return n;
+}
+
+void pg_node_free(pg_node *n)
+{
+    if (!n)
+        return;
+
+    pg_node **stack = NULL;
+    size_t sp = 0, cap = 0;
+
+    if (cap == 0) {
+        cap = 16;
+        stack = malloc(cap * sizeof(*stack));
+        assert(stack);
+    }
+    stack[sp++] = n;
+
+    while (sp) {
+        pg_node *t = stack[--sp];
+        if (--t->refs)
+            continue;
+        pg_tensor_free(t->value);
+        pg_tensor_free(t->grad);
+        free(t->ctx);
+        if (t->nparents) {
+            if (sp + t->nparents > cap) {
+                while (sp + t->nparents > cap)
+                    cap *= 2;
+                pg_node **ns = realloc(stack, cap * sizeof(*ns));
+                assert(ns);
+                stack = ns;
+            }
+            for (size_t i = 0; i < t->nparents; i++)
+                stack[sp++] = t->parents[i];
+        }
+        free(t->parents);
+        free(t);
+    }
+    free(stack);
+}
+
+static void ensure_grad(pg_node *n)
+{
+    assert(n && n->requires_grad);
+    if (!n->grad)
+        n->grad = pg_tensor_zeros(n->value->ndim, n->value->shape);
+    assert(n->grad);
+}
+
+static void accum(pg_node *dst, const pg_tensor *g, float scale)
+{
+    if (!dst->requires_grad || !g)
+        return;
+
+    ensure_grad(dst);
+    pg_tensor *dg = dst->grad;
+    assert(g->ndim >= dg->ndim);
+
+    if (pg_shape_equal(dg->ndim, dg->shape, g->ndim, g->shape)) {
+        for (size_t i = 0; i < dg->numel; i++)
+            dg->data[i] += scale * g->data[i];
+        return;
+    }
+
+    size_t off = g->ndim - dg->ndim;
+    size_t proj[PG_MAX_NDIM];
+    for (size_t d = 0; d < g->ndim; d++) {
+        if (d < off) {
+            proj[d] = 0;
+            continue;
+        }
+        size_t j = d - off;
+        proj[d] = dg->shape[j] == 1 ? 0 : dg->stride[j];
+    }
+
+    size_t idx[PG_MAX_NDIM] = {0};
+    size_t o = 0;
+    for (size_t p = 0; p < g->numel; p++) {
+        dg->data[o] += scale * g->data[p];
+        for (size_t d = g->ndim; d-- > 0;) {
+            idx[d]++;
+            o += proj[d];
+            if (idx[d] < g->shape[d])
+                break;
+            idx[d] = 0;
+            o -= proj[d] * g->shape[d];
+        }
+    }
+}
+
+typedef struct {
+    size_t axis;
+    bool keepdim;
+} red_ctx;
+
+static pg_tensor *expand_reduce(const pg_tensor *g, const pg_tensor *like,
+                                size_t axis, bool keepdim)
+{
+    pg_tensor *r = pg_tensor_zeros(like->ndim, like->shape);
+    if (!r)
+        return NULL;
+
+    size_t sg[PG_MAX_NDIM];
+    for (size_t d = 0; d < like->ndim; d++) {
+        if (d == axis) {
+            sg[d] = 0;
+            continue;
+        }
+        size_t gd = keepdim ? d : (d < axis ? d : d - 1);
+        sg[d] = g->stride[gd];
+    }
+
+    size_t idx[PG_MAX_NDIM] = {0};
+    size_t og = 0;
+    for (size_t p = 0; p < r->numel; p++) {
+        r->data[p] = g->data[og];
+        for (size_t d = like->ndim; d-- > 0;) {
+            idx[d]++;
+            og += sg[d];
+            if (idx[d] < like->shape[d])
+                break;
+            idx[d] = 0;
+            og -= sg[d] * like->shape[d];
+        }
+    }
+    return r;
+}
+
+static void bwd_add(pg_node *n)
+{
+    accum(n->parents[0], n->grad, 1.0f);
+    accum(n->parents[1], n->grad, 1.0f);
+}
+
+static void bwd_sub(pg_node *n)
+{
+    accum(n->parents[0], n->grad, 1.0f);
+    accum(n->parents[1], n->grad, -1.0f);
+}
+
+static void bwd_mul(pg_node *n)
+{
+    pg_node *pa = n->parents[0], *pb = n->parents[1];
+    if (pa->requires_grad) {
+        pg_tensor *t = pg_mul(n->grad, pb->value);
+        assert(t);
+        accum(pa, t, 1.0f);
+        pg_tensor_free(t);
+    }
+    if (pb->requires_grad) {
+        pg_tensor *t = pg_mul(n->grad, pa->value);
+        assert(t);
+        accum(pb, t, 1.0f);
+        pg_tensor_free(t);
+    }
+}
+
+static void bwd_div(pg_node *n)
+{
+    pg_node *pa = n->parents[0], *pb = n->parents[1];
+    if (pa->requires_grad) {
+        pg_tensor *t = pg_div(n->grad, pb->value);
+        assert(t);
+        accum(pa, t, 1.0f);
+        pg_tensor_free(t);
+    }
+    if (pb->requires_grad) {
+        pg_tensor *d = pg_mul(pb->value, pb->value);
+        pg_tensor *num = pg_mul(n->grad, pa->value);
+        pg_tensor *t = num ? pg_div(num, d) : NULL;
+        assert(t);
+        accum(pb, t, -1.0f);
+        pg_tensor_free(d);
+        pg_tensor_free(num);
+        pg_tensor_free(t);
+    }
+}
+
+static void bwd_neg(pg_node *n)
+{
+    accum(n->parents[0], n->grad, -1.0f);
+}
+
+static void bwd_exp(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++)
+        p->grad->data[i] += n->grad->data[i] * n->value->data[i];
+}
+
+static void bwd_log(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++)
+        p->grad->data[i] += n->grad->data[i] / p->value->data[i];
+}
+
+static void bwd_sqrt(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++)
+        p->grad->data[i] += 0.5f * n->grad->data[i] / n->value->data[i];
+}
+
+static void bwd_sin(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++)
+        p->grad->data[i] += n->grad->data[i] * cosf(p->value->data[i]);
+}
+
+static void bwd_cos(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++)
+        p->grad->data[i] -= n->grad->data[i] * sinf(p->value->data[i]);
+}
+
+static void bwd_relu(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++)
+        if (p->value->data[i] > 0.0f)
+            p->grad->data[i] += n->grad->data[i];
+}
+
+static void bwd_sigmoid(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++) {
+        float o = n->value->data[i];
+        p->grad->data[i] += n->grad->data[i] * o * (1.0f - o);
+    }
+}
+
+static void bwd_tanh(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    ensure_grad(p);
+    for (size_t i = 0; i < p->grad->numel; i++) {
+        float o = n->value->data[i];
+        p->grad->data[i] += n->grad->data[i] * (1.0f - o * o);
+    }
+}
+
+static void bwd_matmul(pg_node *n)
+{
+    pg_node *pa = n->parents[0], *pb = n->parents[1];
+    const pg_tensor *a = pa->value, *b = pb->value, *g = n->grad;
+
+    bool av = a->ndim == 1, bv = b->ndim == 1;
+    size_t am = av ? 1 : a->shape[a->ndim - 2];
+    size_t ak = a->shape[a->ndim - 1];
+    size_t bn = bv ? 1 : b->shape[b->ndim - 1];
+
+    bool abat = !av && a->ndim > 2;
+    bool bbat = !bv && b->ndim > 2;
+
+    size_t nbatch = 1;
+    if (abat)
+        for (size_t d = 0; d < a->ndim - 2; d++)
+            nbatch *= a->shape[d];
+    else if (bbat)
+        for (size_t d = 0; d < b->ndim - 2; d++)
+            nbatch *= b->shape[d];
+
+    size_t step_a = abat ? am * ak : 0;
+    size_t step_b = bbat ? ak * bn : 0;
+    size_t step_g = am * bn;
+
+    if (!pa->requires_grad && !pb->requires_grad)
+        return;
+    if (av && bv) {
+        if (pa->requires_grad) {
+            ensure_grad(pa);
+            for (size_t i = 0; i < ak; i++)
+                pa->grad->data[i] += g->data[0] * b->data[i];
+        }
+        if (pb->requires_grad) {
+            ensure_grad(pb);
+            for (size_t i = 0; i < ak; i++)
+                pb->grad->data[i] += g->data[0] * a->data[i];
+        }
+        return;
+    }
+
+    pg_tensor *ga = pa->requires_grad ? (ensure_grad(pa), pa->grad) : NULL;
+    pg_tensor *gb = pb->requires_grad ? (ensure_grad(pb), pb->grad) : NULL;
+
+    for (size_t s = 0; s < nbatch; s++) {
+        const float *ap = a->data + s * step_a;
+        const float *bp = b->data + s * step_b;
+        const float *gp = g->data + s * step_g;
+        float *gap = ga ? ga->data + (av ? 0 : s * step_a) : NULL;
+        float *gbp = gb ? gb->data + (bv ? 0 : s * step_b) : NULL;
+
+        if (gap)
+            for (size_t i = 0; i < am; i++)
+                for (size_t p2 = 0; p2 < ak; p2++) {
+                    float acc = 0.0f;
+                    for (size_t j = 0; j < bn; j++)
+                        acc += gp[i * bn + j] * bp[p2 * bn + j];
+                    gap[i * ak + p2] += acc;
+                }
+
+        if (gbp)
+            for (size_t p2 = 0; p2 < ak; p2++)
+                for (size_t j = 0; j < bn; j++) {
+                    float acc = 0.0f;
+                    for (size_t i = 0; i < am; i++)
+                        acc += ap[i * ak + p2] * gp[i * bn + j];
+                    gbp[p2 * bn + j] += acc;
+                }
+    }
+}
+
+static void bwd_reduce(pg_node *n, float scale)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    red_ctx *cx = n->ctx;
+    pg_tensor *e = expand_reduce(n->grad, p->value, cx->axis, cx->keepdim);
+    assert(e);
+    accum(p, e, scale);
+    pg_tensor_free(e);
+}
+
+static void bwd_sum(pg_node *n)
+{
+    bwd_reduce(n, 1.0f);
+}
+
+static void bwd_mean(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    red_ctx *cx = n->ctx;
+    bwd_reduce(n, 1.0f / (float)p->value->shape[cx->axis]);
+}
+
+static void bwd_softmax(pg_node *n)
+{
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    red_ctx *cx = n->ctx;
+
+    pg_tensor *go = pg_mul(n->grad, n->value);
+    pg_tensor *s = go ? pg_sum(go, cx->axis, true) : NULL;
+    pg_tensor *se = s ? expand_reduce(s, n->value, cx->axis, true) : NULL;
+    pg_tensor *diff = se ? pg_sub(n->grad, se) : NULL;
+    pg_tensor *gx = diff ? pg_mul(n->value, diff) : NULL;
+    assert(gx);
+
+    accum(p, gx, 1.0f);
+    pg_tensor_free(go);
+    pg_tensor_free(s);
+    pg_tensor_free(se);
+    pg_tensor_free(diff);
+    pg_tensor_free(gx);
+}
+
+#define BINARY_OP(agn, opn, bwd)                                   \
+    pg_node *agn(pg_node *a, pg_node *b)                           \
+    {                                                              \
+        assert(a && b && a->value && b->value);                    \
+        pg_tensor *v = opn(a->value, b->value);                    \
+        if (!v)                                                    \
+            return NULL;                                           \
+        return attach(v, 2, (pg_node *[]){a, b}, bwd, NULL);       \
+    }
+
+BINARY_OP(pg_ag_add, pg_add, bwd_add)
+BINARY_OP(pg_ag_sub, pg_sub, bwd_sub)
+BINARY_OP(pg_ag_mul, pg_mul, bwd_mul)
+BINARY_OP(pg_ag_div, pg_div, bwd_div)
+
+#define UNARY_OP(agn, opn, bwd)                                    \
+    pg_node *agn(pg_node *a)                                       \
+    {                                                              \
+        assert(a && a->value);                                     \
+        pg_tensor *v = opn(a->value);                              \
+        if (!v)                                                    \
+            return NULL;                                           \
+        return attach(v, 1, &a, bwd, NULL);                        \
+    }
+
+UNARY_OP(pg_ag_neg, pg_neg, bwd_neg)
+UNARY_OP(pg_ag_exp, pg_exp, bwd_exp)
+UNARY_OP(pg_ag_log, pg_log, bwd_log)
+UNARY_OP(pg_ag_sqrt, pg_sqrt, bwd_sqrt)
+UNARY_OP(pg_ag_sin, pg_sin, bwd_sin)
+UNARY_OP(pg_ag_cos, pg_cos, bwd_cos)
+UNARY_OP(pg_ag_relu, pg_relu, bwd_relu)
+UNARY_OP(pg_ag_sigmoid, pg_sigmoid, bwd_sigmoid)
+UNARY_OP(pg_ag_tanh, pg_tanh, bwd_tanh)
+
+pg_node *pg_ag_matmul(pg_node *a, pg_node *b)
+{
+    assert(a && b && a->value && b->value);
+    pg_tensor *v = pg_matmul(a->value, b->value);
+    if (!v)
+        return NULL;
+    return attach(v, 2, (pg_node *[]){a, b}, bwd_matmul, NULL);
+}
+
+static pg_node *ag_reduce(pg_node *a, size_t axis, bool keepdim, bool mean)
+{
+    assert(a && a->value && a->value->ndim >= 1 && axis < a->value->ndim);
+
+    red_ctx *cx = malloc(sizeof(*cx));
+    if (!cx)
+        return NULL;
+    cx->axis = axis;
+    cx->keepdim = keepdim;
+
+    pg_tensor *v = mean ? pg_mean(a->value, axis, keepdim)
+                        : pg_sum(a->value, axis, keepdim);
+    if (!v) {
+        free(cx);
+        return NULL;
+    }
+
+    pg_node *r = attach(v, 1, &a, mean ? bwd_mean : bwd_sum, cx);
+    if (!r)
+        free(cx);
+    return r;
+}
+
+pg_node *pg_ag_sum(pg_node *a, size_t axis, bool keepdim)
+{
+    return ag_reduce(a, axis, keepdim, false);
+}
+
+pg_node *pg_ag_mean(pg_node *a, size_t axis, bool keepdim)
+{
+    return ag_reduce(a, axis, keepdim, true);
+}
+
+static pg_node *reduce_all(pg_node *a, bool mean)
+{
+    assert(a && a->value && a->value->ndim >= 1);
+
+    pg_node *cur = pg_node_retain(a);
+    for (size_t d = a->value->ndim; d > 1; d--) {
+        pg_node *next = pg_ag_sum(cur, 0, false);
+        pg_node_free(cur);
+        if (!next)
+            return NULL;
+        cur = next;
+    }
+    pg_node *out = mean ? pg_ag_mean(cur, 0, false) : pg_ag_sum(cur, 0, false);
+    pg_node_free(cur);
+    return out;
+}
+
+pg_node *pg_ag_sum_all(pg_node *a)
+{
+    return reduce_all(a, false);
+}
+
+pg_node *pg_ag_mean_all(pg_node *a)
+{
+    return reduce_all(a, true);
+}
+
+pg_node *pg_ag_softmax(pg_node *a, size_t axis)
+{
+    assert(a && a->value && axis < a->value->ndim);
+
+    red_ctx *cx = malloc(sizeof(*cx));
+    if (!cx)
+        return NULL;
+    cx->axis = axis;
+    cx->keepdim = true;
+
+    pg_tensor *v = pg_softmax(a->value, axis);
+    if (!v) {
+        free(cx);
+        return NULL;
+    }
+
+    pg_node *r = attach(v, 1, &a, bwd_softmax, cx);
+    if (!r)
+        free(cx);
+    return r;
+}
+
+typedef struct {
+    pg_node **items;
+    size_t n, cap;
+} node_vec;
+
+static void vec_push(node_vec *v, pg_node *n)
+{
+    if (v->n == v->cap) {
+        size_t nc = v->cap ? v->cap * 2 : 32;
+        pg_node **ni = realloc(v->items, nc * sizeof(*ni));
+        assert(ni);
+        v->items = ni;
+        v->cap = nc;
+    }
+    v->items[v->n++] = n;
+}
+
+static void topo_sort(pg_node *root, node_vec *order)
+{
+    typedef struct {
+        pg_node *n;
+        size_t i;
+    } frame;
+
+    frame *stk = NULL;
+    size_t sp = 0, cap = 0;
+
+    root->mark = 1;
+    do {
+        if (sp == cap) {
+            cap = cap ? cap * 2 : 32;
+            frame *ns = realloc(stk, cap * sizeof(*ns));
+            assert(ns);
+            stk = ns;
+        }
+        stk[sp].n = root;
+        stk[sp].i = 0;
+        sp++;
+    } while (0);
+
+    while (sp) {
+        frame *f = &stk[sp - 1];
+        if (f->i < f->n->nparents) {
+            pg_node *c = f->n->parents[f->i++];
+            if (c->requires_grad && !c->mark) {
+                c->mark = 1;
+                if (sp == cap) {
+                    cap = cap ? cap * 2 : 32;
+                    frame *ns = realloc(stk, cap * sizeof(*ns));
+                    assert(ns);
+                    stk = ns;
+                }
+                stk[sp].n = c;
+                stk[sp].i = 0;
+                sp++;
+            }
+        } else {
+            vec_push(order, f->n);
+            sp--;
+        }
+    }
+    free(stk);
+}
+
+void pg_backward(pg_node *loss)
+{
+    if (!loss || !loss->requires_grad)
+        return;
+
+    node_vec order = {0};
+    topo_sort(loss, &order);
+
+    for (size_t i = 0; i < order.n; i++)
+        if (order.items[i]->grad)
+            pg_tensor_fill(order.items[i]->grad, 0.0f);
+
+    ensure_grad(loss);
+    pg_tensor_fill(loss->grad, 1.0f);
+
+    for (size_t i = order.n; i-- > 0;) {
+        pg_node *n = order.items[i];
+        if (n->backward && n->grad)
+            n->backward(n);
+    }
+
+    for (size_t i = 0; i < order.n; i++)
+        order.items[i]->mark = 0;
+
+    free(order.items);
+}
