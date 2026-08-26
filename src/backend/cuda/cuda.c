@@ -7,7 +7,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#define TILE 32
+#define BTILE 64
+#define TPT 16
 
 static void *g_ctx;
 static void *g_module;
@@ -103,11 +104,11 @@ static void cuda_gemm(size_t m, size_t n, size_t k,
         &m32, &n32, &k32,
     };
 
-    unsigned gx = (n32 + TILE - 1) / TILE;
-    unsigned gy = (m32 + TILE - 1) / TILE;
+    unsigned gx = (n32 + BTILE - 1) / BTILE;
+    unsigned gy = (m32 + BTILE - 1) / BTILE;
 
     int rc = pg_cuda_drv_get(NULL)->launch_kernel(
-        g_fn_sgemm, gx, gy, 1, TILE, TILE, 1, 0, NULL, params, NULL);
+        g_fn_sgemm, gx, gy, 1, TPT, TPT, 1, 0, NULL, params, NULL);
     assert(rc == 0);
 }
 
