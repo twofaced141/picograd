@@ -24,9 +24,13 @@ static float sgd_step_plain(pg_node *x, float target)
 {
     pg_node *t = pg_var_scalar(target, false);
     pg_node *diff = pg_ag_sub(x, t);
-    pg_node *loss = pg_ag_sum_all(pg_ag_mul(diff, diff));
+    pg_node *sq = pg_ag_mul(diff, diff);
+    pg_node *loss = pg_ag_sum_all(sq);
     pg_backward(loss);
     pg_node_free(loss);
+    pg_node_free(sq);
+    pg_node_free(diff);
+    pg_node_free(t);
     return 2.0f * (pg_node_value(x)->data[0] - target);
 }
 
@@ -100,9 +104,11 @@ static void test_sgd_weight_decay_nesterov(void)
     pg_sgd_add_param(opt, x);
 
     pg_sgd_zero_grad(opt);
-    pg_node *loss = pg_ag_sum_all(pg_ag_mul(x, x));
+    pg_node *sq = pg_ag_mul(x, x);
+    pg_node *loss = pg_ag_sum_all(sq);
     pg_backward(loss);
     pg_node_free(loss);
+    pg_node_free(sq);
     pg_sgd_step(opt);
     CHECK(closef(x->value->data[0], 0.75f));
 

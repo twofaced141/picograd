@@ -28,11 +28,12 @@ DEP      := $(OBJ:.o=.d)
 LIB      := $(BUILD)/libpicograd.a
 
 TESTS    := $(patsubst tests/%.c,$(BUILD)/%,$(wildcard tests/*.c))
+EXAMPLES := $(patsubst examples/%.c,$(BUILD)/%,$(wildcard examples/*.c))
 BENCH    := $(BUILD)/bench_gemm
 
-.PHONY: all test bench test-sde clean
+.PHONY: all test examples bench test-sde clean
 
-all: $(LIB) $(TESTS)
+all: $(LIB) $(TESTS) $(EXAMPLES)
 
 # library
 
@@ -52,8 +53,14 @@ $(BUILD)/%.o: %.S
 $(BUILD)/test_%: tests/test_%.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BUILD)/%: examples/%.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
 test: $(TESTS)
 	@for t in $(TESTS); do ./$$t || exit 1; done
+
+examples: $(EXAMPLES)
+	@for e in $(EXAMPLES); do echo "== $$e =="; ./$$e || exit 1; done
 
 # run tests under Intel SDE (emulates AVX-512 on CPUs without it)
 test-sde: $(TESTS)
