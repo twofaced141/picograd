@@ -6,6 +6,8 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define BTILE 64
@@ -35,41 +37,82 @@ static pg_status cuda_init(void)
         return cached;
     done = 1;
 
+    int debug = getenv("PG_CUDA_DEBUG") != NULL;
     pg_status err = PG_OK;
     const pg_cuda_drv *drv = pg_cuda_drv_get(&err);
-    if (!drv)
+    if (!drv) {
+        if (debug) fprintf(stderr, "picograd/cuda: driver get failed %d\n", err);
         return cached = err;
+    }
 
     int device;
-    if (drv->device_get(&device, 0) != 0)
+    int rc;
+    rc = drv->device_get(&device, 0);
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: cuDeviceGet -> %d\n", rc);
         return cached = PG_ERR_UNSUPPORTED;
-    if (drv->ctx_create(&g_ctx, 0, device) != 0)
+    }
+    rc = drv->ctx_create(&g_ctx, 0, device);
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: cuCtxCreate -> %d\n", rc);
         return cached = PG_ERR_UNSUPPORTED;
-    if (drv->module_load_data(&g_module, sgemm_ptx) != 0)
+    }
+    rc = drv->module_load_data(&g_module, sgemm_ptx);
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: cuModuleLoadData sgemm -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_sgemm, g_module, "pg_sgemm_kernel") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_sgemm, g_module, "pg_sgemm_kernel");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: cuModuleGetFunction sgemm -> %d\n", rc);
         return cached = PG_ERR_GEMM;
+    }
 
-    if (drv->module_load_data(&g_ops_module, ops_ptx) != 0)
+    rc = drv->module_load_data(&g_ops_module, ops_ptx);
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: cuModuleLoadData ops -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_map, g_ops_module, "pg_k_map") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_map, g_ops_module, "pg_k_map");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_map -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_bin, g_ops_module, "pg_k_bin") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_bin, g_ops_module, "pg_k_bin");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_bin -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_accum_gather, g_ops_module, "pg_k_accum_gather") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_accum_gather, g_ops_module, "pg_k_accum_gather");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_gather -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_accum_scatter, g_ops_module, "pg_k_accum_scatter") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_accum_scatter, g_ops_module, "pg_k_accum_scatter");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_scatter -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_sum_axis, g_ops_module, "pg_k_sum_axis") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_sum_axis, g_ops_module, "pg_k_sum_axis");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_sum_axis -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_softmax, g_ops_module, "pg_k_softmax") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_softmax, g_ops_module, "pg_k_softmax");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_softmax -> %d\n", rc);
         return cached = PG_ERR_GEMM;
-    if (drv->module_get_function(&g_fn_copy_strided, g_ops_module, "pg_k_copy_strided") != 0)
+    }
+    rc = drv->module_get_function(&g_fn_copy_strided, g_ops_module, "pg_k_copy_strided");
+    if (rc != 0) {
+        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_copy_strided -> %d\n", rc);
         return cached = PG_ERR_GEMM;
+    }
 
     cuda_register_gpu();
 
     cached = PG_OK;
+    if (debug) fprintf(stderr, "picograd/cuda: init ok\n");
     return cached;
 }
 
