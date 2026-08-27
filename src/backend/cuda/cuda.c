@@ -70,49 +70,36 @@ static pg_status cuda_init(void)
 
     rc = drv->module_load_data(&g_ops_module, ops_ptx);
     if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: cuModuleLoadData ops -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
+        if (debug) fprintf(stderr, "picograd/cuda: cuModuleLoadData ops -> %d (continuing with sgemm only)\n", rc);
+        // sgemm is enough for bench; ops will fallback to CPU
+        cached = PG_OK;
+        if (debug) fprintf(stderr, "picograd/cuda: init ok (sgemm only)\n");
+        return cached;
     }
+    int ops_ok = 1;
     rc = drv->module_get_function(&g_fn_map, g_ops_module, "pg_k_map");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_map -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_map -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_bin, g_ops_module, "pg_k_bin");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_bin -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_bin -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_accum_gather, g_ops_module, "pg_k_accum_gather");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_gather -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_gather -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_accum_scatter, g_ops_module, "pg_k_accum_scatter");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_scatter -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_scatter -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_sum_axis, g_ops_module, "pg_k_sum_axis");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_sum_axis -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_sum_axis -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_softmax, g_ops_module, "pg_k_softmax");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_softmax -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_softmax -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_copy_strided, g_ops_module, "pg_k_copy_strided");
-    if (rc != 0) {
-        if (debug) fprintf(stderr, "picograd/cuda: get pg_k_copy_strided -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
-    }
+    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_copy_strided -> %d\n", rc); ops_ok = 0; }
 
-    cuda_register_gpu();
+    if (ops_ok) {
+        cuda_register_gpu();
+        if (debug) fprintf(stderr, "picograd/cuda: init ok (sgemm+ops)\n");
+    } else {
+        if (debug) fprintf(stderr, "picograd/cuda: init ok (sgemm only, ops fallback to CPU)\n");
+    }
 
     cached = PG_OK;
-    if (debug) fprintf(stderr, "picograd/cuda: init ok\n");
     return cached;
 }
 
