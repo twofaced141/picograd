@@ -41,10 +41,23 @@ const pg_cuda_drv *pg_cuda_drv_get(pg_status *err)
 
     int debug = getenv("PG_CUDA_DEBUG") != NULL;
     memset(&g_drv, 0, sizeof(g_drv));
-    g_drv.handle = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+    const char *candidates[] = {
+        "libcuda.so.1",
+        "libcuda.so",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so",
+        "/usr/local/cuda/lib64/stubs/libcuda.so",
+        "/usr/local/cuda/lib64/libcuda.so.1",
+    };
+    for (size_t ci = 0; ci < sizeof(candidates)/sizeof(candidates[0]); ci++) {
+        g_drv.handle = dlopen(candidates[ci], RTLD_NOW | RTLD_LOCAL);
+        if (g_drv.handle) {
+            if (debug) fprintf(stderr, "picograd/cuda: dlopen ok %s\n", candidates[ci]);
+            break;
+        }
+        if (debug) fprintf(stderr, "picograd/cuda: dlopen %s: %s\n", candidates[ci], dlerror());
+    }
     if (!g_drv.handle) {
-        if (debug)
-            fprintf(stderr, "picograd/cuda: dlopen: %s\n", dlerror());
         goto fail;
     }
 
