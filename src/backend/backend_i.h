@@ -27,6 +27,10 @@ extern const pg_backend_ops pg_backend_cuda;
 extern const pg_backend_ops pg_backend_metal;
 #endif
 
+#if defined(PICOGRAD_BACKEND_HIP)
+extern const pg_backend_ops pg_backend_hip;
+#endif
+
 /* device kernel entry points, registered by the active gpu backend */
 typedef struct pg_gpu_kernels {
     pg_status (*map)(float *, const float *, size_t, int);

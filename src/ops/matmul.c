@@ -22,7 +22,7 @@ static pg_tensor *permute_copy(const pg_tensor *t, const size_t *order)
         assert(order[j] < t->ndim);
         shape[j] = t->shape[order[j]];
     }
-    pg_tensor *out = pg_tensor_new(t->ndim, shape);
+    pg_tensor *out = pg_tensor_empty(t->ndim, shape);
     if (!out)
         return NULL;
 
@@ -110,7 +110,7 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
     if (rndim == 0)
         rshape[rndim++] = 1;
 
-    pg_tensor *out = pg_tensor_new(rndim, rshape);
+    pg_tensor *out = pg_tensor_empty(rndim, rshape);
     if (!out)
         return NULL;
     if (out->numel > UINT_MAX) {
@@ -233,7 +233,7 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
     if (rndim == 0)
         rshape[rndim++] = 1;
 
-    pg_tensor *out = pg_tensor_new(rndim, rshape);
+    pg_tensor *out = pg_tensor_empty(rndim, rshape);
     if (!out)
         return NULL;
 
@@ -280,7 +280,7 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
     if (m > UINT_MAX || n > UINT_MAX || k > UINT_MAX || batch > UINT_MAX)
         return NULL;
     size_t shape[3] = {batch, m, n};
-    pg_tensor *out = pg_tensor_new(3, shape);
+    pg_tensor *out = pg_tensor_empty(3, shape);
     if (!out) return NULL;
     if (out->numel > UINT_MAX) { pg_tensor_free(out); return NULL; }
 
@@ -336,7 +336,7 @@ pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
     size_t n = b->shape[2];
 
     size_t shape[3] = {batch, m, n};
-    pg_tensor *out = pg_tensor_new(3, shape);
+    pg_tensor *out = pg_tensor_empty(3, shape);
     if (!out)
         return NULL;
 

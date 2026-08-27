@@ -27,7 +27,7 @@ pg_tensor *pg_gather(const pg_tensor *t, size_t axis, const pg_tensor *indices)
     if (!indices_valid(indices, t->shape[axis]))
         return NULL;
 
-    pg_tensor *out = pg_tensor_new(indices->ndim, indices->shape);
+    pg_tensor *out = pg_tensor_empty(indices->ndim, indices->shape);
     if (!out)
         return NULL;
 
@@ -80,7 +80,7 @@ pg_tensor *pg_index_select(const pg_tensor *t, size_t axis, const pg_tensor *ind
     size_t shape[PG_MAX_NDIM];
     memcpy(shape, t->shape, t->ndim * sizeof(size_t));
     shape[axis] = indices->numel;
-    pg_tensor *out = pg_tensor_new(t->ndim, shape);
+    pg_tensor *out = pg_tensor_empty(t->ndim, shape);
     if (!out)
         return NULL;
 
@@ -107,7 +107,7 @@ pg_tensor *pg_masked_select(const pg_tensor *t, const pg_tensor *mask)
             n++;
 
     size_t shape[1] = {n};
-    pg_tensor *out = pg_tensor_new(1, shape);
+    pg_tensor *out = pg_tensor_empty(1, shape);
     if (!out)
         return NULL;
 

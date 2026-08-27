@@ -123,8 +123,8 @@ static pg_kv sort_topk_impl(const pg_tensor *t, size_t axis, size_t take, bool d
 
     size_t shape[PG_MAX_NDIM], ondim;
     fill_out_shape(t, axis, true, take, shape, &ondim);
-    kv.values = pg_tensor_new(ondim, shape);
-    kv.indices = pg_tensor_new(ondim, shape);
+    kv.values = pg_tensor_empty(ondim, shape);
+    kv.indices = pg_tensor_empty(ondim, shape);
     if (!kv.values || !kv.indices)
         goto fail;
 

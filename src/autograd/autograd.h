@@ -73,6 +73,9 @@ pg_node *pg_ag_mean_all(pg_node *a);
 
 pg_node *pg_ag_softmax(pg_node *a, size_t axis);
 
+pg_node *pg_ag_layernorm(pg_node *x, pg_node *weight, pg_node *bias, float eps);
+pg_node *pg_ag_rmsnorm(pg_node *x, pg_node *weight, float eps);
+
 void pg_backward(pg_node *loss);
 
 #ifdef __cplusplus

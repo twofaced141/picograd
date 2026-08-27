@@ -2,11 +2,76 @@
 
 #include "common.h"
 #include "../backend/backend.h"
+#include "../thread/pool.h"
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct { const float *src; float *dst; size_t outer; size_t len; size_t inner; size_t ostride; } reduce_sum_par_t;
+static void reduce_sum_par_fn(void *ctx, size_t s, size_t e){
+    reduce_sum_par_t *p=ctx;
+    for(size_t o=s;o<e;o++){
+        float *dptr = p->dst + o * p->ostride;
+        const float *base = p->src + o * p->len * p->inner;
+        for(size_t ii=0;ii<p->inner;ii++) dptr[ii]=0.0f;
+        for(size_t v=0;v<p->len;v++){
+            const float *sptr = base + v * p->inner;
+            #pragma GCC ivdep
+            for(size_t ii=0;ii<p->inner;ii++) dptr[ii]+=sptr[ii];
+        }
+    }
+}
+typedef struct { const float *src; float *dst; size_t outer; size_t len; size_t inner; size_t ostride; } reduce_max_par_t;
+static void reduce_max_par_fn(void *ctx, size_t s, size_t e){
+    reduce_max_par_t *p=ctx;
+    for(size_t o=s;o<e;o++){
+        float *dptr = p->dst + o * p->ostride;
+        const float *base = p->src + o * p->len * p->inner;
+        for(size_t ii=0;ii<p->inner;ii++) dptr[ii]=base[ii];
+        for(size_t v=1;v<p->len;v++){
+            const float *sptr=base+v*p->inner;
+            #pragma GCC ivdep
+            for(size_t ii=0;ii<p->inner;ii++) if(sptr[ii]>dptr[ii]) dptr[ii]=sptr[ii];
+        }
+    }
+}
+static void reduce_min_par_fn(void *ctx, size_t s, size_t e){
+    reduce_max_par_t *p=ctx;
+    for(size_t o=s;o<e;o++){
+        float *dptr = p->dst + o * p->ostride;
+        const float *base = p->src + o * p->len * p->inner;
+        for(size_t ii=0;ii<p->inner;ii++) dptr[ii]=base[ii];
+        for(size_t v=1;v<p->len;v++){
+            const float *sptr=base+v*p->inner;
+            #pragma GCC ivdep
+            for(size_t ii=0;ii<p->inner;ii++) if(sptr[ii]<dptr[ii]) dptr[ii]=sptr[ii];
+        }
+    }
+}
+typedef struct { const float *src; float *dst; size_t outer; size_t len; } reduce_sum1_par_t;
+static void reduce_sum1_par_fn(void *ctx, size_t s, size_t e){
+    reduce_sum1_par_t *p=ctx;
+    for(size_t o=s;o<e;o++){
+        const float *src=p->src+o*p->len;
+        float *dst=p->dst+o;
+        float acc=0.0f;
+        #pragma GCC ivdep
+        for(size_t v=0;v<p->len;v++) acc+=src[v];
+        *dst=acc;
+    }
+}
+typedef struct { const float *src; float *dst; size_t outer; size_t len; float init; float (*f)(float,float); } reduce_fold1_par_t;
+static void reduce_fold1_par_fn(void *ctx, size_t s, size_t e){
+    reduce_fold1_par_t *p=ctx;
+    for(size_t o=s;o<e;o++){
+        const float *src=p->src+o*p->len;
+        float acc=p->init;
+        for(size_t v=0;v<p->len;v++) acc=p->f(acc,src[v]);
+        p->dst[o]=acc;
+    }
+}
 
 static void out_shape_for(const pg_tensor *t, size_t axis, bool keepdim, size_t *shape)
 {
@@ -38,7 +103,7 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
     out_shape_for(t, axis, keepdim, shape);
     size_t ondim = keepdim || t->ndim > 1 ? (keepdim ? t->ndim : t->ndim - 1) : 1;
 
-    pg_tensor *out = pg_tensor_new(ondim, shape);
+    pg_tensor *out = pg_tensor_empty(ondim, shape);
     if (!out)
         return NULL;
 
@@ -46,6 +111,93 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
     pg_axis_split(t->ndim, t->shape, axis, &outer, &len, &inner);
 
     size_t ostride = keepdim && t->ndim > 1 ? out->stride[axis] : inner;
+
+    // Fast path: inner == 1 => contiguous reduction along last axis (most common)
+    if (inner == 1) {
+        if (outer >= 32 && outer * len >= 32768) {
+            // parallel over outer
+            if (f == f_sum) {
+                reduce_sum1_par_t ctx={t->data, out->data, outer, len};
+                pg_parallel_for(outer, 32, reduce_sum1_par_fn, &ctx);
+            } else {
+                reduce_fold1_par_t ctx={t->data, out->data, outer, len, init, f};
+                pg_parallel_for(outer, 32, reduce_fold1_par_fn, &ctx);
+                // adjust for keepdim stride if needed (already contiguous for inner==1, but ensure)
+                if (keepdim && ostride != 1) {
+                    // Need to scatter results when ostride !=1? For last axis ostride==1, so not needed
+                }
+            }
+            return out;
+        }
+        for (size_t o = 0; o < outer; o++) {
+            const float *src = t->data + o * len;
+            float *dst = out->data + o * (ostride ? ostride : 1);
+            float acc = init;
+            for (size_t v = 0; v < len; v++) acc = f(acc, src[v]);
+            *dst = acc;
+        }
+        if (outer > 0 && inner == 1) {
+            return out;
+        }
+    }
+
+    // Cache-friendly blocked version for inner > 1 (e.g., axis=0 column sum)
+    if (inner > 1) {
+        // initialize out
+        for (size_t i = 0; i < out->numel; i++) out->data[i] = init;
+        if (f == f_sum) {
+            if (outer >= 8 && outer * inner * len >= 16384) {
+                reduce_sum_par_t ctx={t->data, out->data, outer, len, inner, ostride};
+                pg_parallel_for(outer, 8, reduce_sum_par_fn, &ctx);
+            } else {
+                for (size_t o = 0; o < outer; o++) {
+                    float *dptr = out->data + o * ostride;
+                    const float *base = t->data + o * len * inner;
+                    for (size_t v = 0; v < len; v++) {
+                        const float *sptr = base + v * inner;
+                        #pragma GCC ivdep
+                        for (size_t ii = 0; ii < inner; ii++) dptr[ii] += sptr[ii];
+                    }
+                }
+            }
+            return out;
+        } else if (f == f_max) {
+            if (outer >= 8 && outer * inner * len >= 16384) {
+                reduce_max_par_t ctx={t->data, out->data, outer, len, inner, ostride};
+                pg_parallel_for(outer, 8, reduce_max_par_fn, &ctx);
+            } else {
+                for (size_t o = 0; o < outer; o++) {
+                    float *dptr = out->data + o * ostride;
+                    const float *base = t->data + o * len * inner;
+                    for (size_t ii = 0; ii < inner; ii++) dptr[ii] = base[ii];
+                    for (size_t v = 1; v < len; v++) {
+                        const float *sptr = base + v * inner;
+                        #pragma GCC ivdep
+                        for (size_t ii = 0; ii < inner; ii++) if (sptr[ii] > dptr[ii]) dptr[ii] = sptr[ii];
+                    }
+                }
+            }
+            return out;
+        } else if (f == f_min) {
+            if (outer >= 8 && outer * inner * len >= 16384) {
+                reduce_max_par_t ctx={t->data, out->data, outer, len, inner, ostride};
+                pg_parallel_for(outer, 8, reduce_min_par_fn, &ctx);
+            } else {
+                for (size_t o = 0; o < outer; o++) {
+                    float *dptr = out->data + o * ostride;
+                    const float *base = t->data + o * len * inner;
+                    for (size_t ii = 0; ii < inner; ii++) dptr[ii] = base[ii];
+                    for (size_t v = 1; v < len; v++) {
+                        const float *sptr = base + v * inner;
+                        #pragma GCC ivdep
+                        for (size_t ii = 0; ii < inner; ii++) if (sptr[ii] < dptr[ii]) dptr[ii] = sptr[ii];
+                    }
+                }
+            }
+            return out;
+        }
+        // fallback for other f
+    }
 
     for (size_t o = 0; o < outer; o++) {
         for (size_t ii = 0; ii < inner; ii++) {
@@ -71,7 +223,7 @@ static pg_tensor *try_sum_gpu(const pg_tensor *t, size_t axis, bool keepdim, flo
     if (ondim > PG_MAX_NDIM)
         return NULL;
 
-    pg_tensor *out = pg_tensor_new(ondim, shape);
+    pg_tensor *out = pg_tensor_empty(ondim, shape);
     if (!out)
         return NULL;
     if (out->numel > UINT_MAX)
@@ -188,7 +340,7 @@ static pg_tensor *reduce_moment(const pg_tensor *t, size_t axis, bool keepdim,
     size_t shape[PG_MAX_NDIM];
     out_shape_for(t, axis, keepdim, shape);
     size_t ondim = keepdim ? t->ndim : (t->ndim > 1 ? t->ndim - 1 : 1);
-    out = pg_tensor_new(ondim, shape);
+    out = pg_tensor_empty(ondim, shape);
     if (!out) {
         pg_tensor_free(mean);
         return NULL;
@@ -232,7 +384,7 @@ static pg_tensor *reduce_arg(const pg_tensor *t, size_t axis, bool keepdim, bool
     out_shape_for(t, axis, keepdim, shape);
     size_t ondim = keepdim ? t->ndim : (t->ndim > 1 ? t->ndim - 1 : 1);
 
-    pg_tensor *out = pg_tensor_new(ondim, shape);
+    pg_tensor *out = pg_tensor_empty(ondim, shape);
     if (!out)
         return NULL;
 

@@ -5,11 +5,13 @@
 #include "../ops/activations.h"
 #include "../ops/elementwise.h"
 #include "../ops/matmul.h"
+#include "../ops/norm.h"
 #include "../ops/reduce.h"
 
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -469,6 +471,26 @@ static void bwd_matmul(pg_node *n)
     pg_tensor *ga = pa->requires_grad ? (ensure_grad(pa), pa->grad) : NULL;
     pg_tensor *gb = pb->requires_grad ? (ensure_grad(pb), pb->grad) : NULL;
 
+    // Use GEMM for large problems, fallback to naive for tiny where temp alloc overhead > compute
+    bool use_gemm = (am * bn * ak > 4096) && !av && !bv;
+    float *tmp_trans = NULL;
+    float *tmp_out = NULL;
+    size_t tmp_trans_cap = 0, tmp_out_cap = 0;
+    if (use_gemm) {
+        size_t need_trans = ak * bn > am * ak ? ak * bn : am * ak;
+        size_t need_out = am * ak > ak * bn ? am * ak : ak * bn;
+        tmp_trans = malloc(need_trans * sizeof(float));
+        tmp_out = malloc(need_out * sizeof(float));
+        if (!tmp_trans || !tmp_out) {
+            free(tmp_trans); free(tmp_out);
+            tmp_trans = NULL; tmp_out = NULL;
+            use_gemm = false;
+        } else {
+            tmp_trans_cap = need_trans;
+            tmp_out_cap = need_out;
+        }
+    }
+
     for (size_t s = 0; s < nbatch; s++) {
         const float *ap = a->data + s * step_a;
         const float *bp = b->data + s * step_b;
@@ -476,24 +498,54 @@ static void bwd_matmul(pg_node *n)
         float *gap = ga ? ga->data + (av ? 0 : s * step_a) : NULL;
         float *gbp = gb ? gb->data + (bv ? 0 : s * step_b) : NULL;
 
-        if (gap)
-            for (size_t i = 0; i < am; i++)
-                for (size_t p2 = 0; p2 < ak; p2++) {
-                    float acc = 0.0f;
-                    for (size_t j = 0; j < bn; j++)
-                        acc += gp[i * bn + j] * bp[p2 * bn + j];
-                    gap[i * ak + p2] += acc;
+        if (gap) {
+            if (use_gemm) {
+                // gap += grad * B^T   grad[am,bn] * B^T[bn,ak]
+                // transpose B [ak,bn] -> [bn,ak]
+                // tmp_trans = B^T
+                for (size_t i = 0; i < ak; i++) {
+                    for (size_t j = 0; j < bn; j++) tmp_trans[j * ak + i] = bp[i * bn + j];
                 }
+                // tmp_out = grad * B^T
+                // zero tmp_out
+                for (size_t i = 0; i < am * ak; i++) tmp_out[i] = 0.0f;
+                pg_cpu_gemm(am, ak, bn, gp, bn, tmp_trans, ak, tmp_out, ak);
+                #pragma GCC ivdep
+                for (size_t i = 0; i < am * ak; i++) gap[i] += tmp_out[i];
+            } else {
+                for (size_t i = 0; i < am; i++)
+                    for (size_t p2 = 0; p2 < ak; p2++) {
+                        float acc = 0.0f;
+                        for (size_t j = 0; j < bn; j++)
+                            acc += gp[i * bn + j] * bp[p2 * bn + j];
+                        gap[i * ak + p2] += acc;
+                    }
+            }
+        }
 
-        if (gbp)
-            for (size_t p2 = 0; p2 < ak; p2++)
-                for (size_t j = 0; j < bn; j++) {
-                    float acc = 0.0f;
-                    for (size_t i = 0; i < am; i++)
-                        acc += ap[i * ak + p2] * gp[i * bn + j];
-                    gbp[p2 * bn + j] += acc;
+        if (gbp) {
+            if (use_gemm) {
+                // gbp += A^T * grad   A^T[ak,am] * grad[am,bn]
+                for (size_t i = 0; i < am; i++) {
+                    for (size_t j = 0; j < ak; j++) tmp_trans[j * am + i] = ap[i * ak + j];
                 }
+                for (size_t i = 0; i < ak * bn; i++) tmp_out[i] = 0.0f;
+                pg_cpu_gemm(ak, bn, am, tmp_trans, am, gp, bn, tmp_out, bn);
+                #pragma GCC ivdep
+                for (size_t i = 0; i < ak * bn; i++) gbp[i] += tmp_out[i];
+            } else {
+                for (size_t p2 = 0; p2 < ak; p2++)
+                    for (size_t j = 0; j < bn; j++) {
+                        float acc = 0.0f;
+                        for (size_t i = 0; i < am; i++)
+                            acc += ap[i * ak + p2] * gp[i * bn + j];
+                        gbp[p2 * bn + j] += acc;
+                    }
+            }
+        }
     }
+    free(tmp_trans);
+    free(tmp_out);
 }
 
 static void bwd_reduce(pg_node *n, float scale)
@@ -665,6 +717,160 @@ pg_node *pg_ag_softmax(pg_node *a, size_t axis)
     pg_node *r = attach(v, 1, &a, bwd_softmax, cx);
     if (!r)
         free(cx);
+    return r;
+}
+
+// ---------- layernorm / rmsnorm ----------
+typedef struct { float eps; size_t N; bool has_w; bool has_b; } ln_ctx_t;
+typedef struct { float eps; size_t N; bool has_w; } rms_ctx_t;
+
+static void bwd_layernorm(pg_node *n){
+    ln_ctx_t *cx = (ln_ctx_t*)n->ctx;
+    pg_node *px = n->parents[0];
+    pg_node *pw = NULL, *pb = NULL;
+    size_t idx=1;
+    if(cx->has_w){ pw = n->parents[idx++]; }
+    if(cx->has_b){ pb = n->parents[idx++]; }
+    size_t N = cx->N;
+    float eps = cx->eps;
+    const pg_tensor *x = px->value;
+    const pg_tensor *g = n->grad; // grad_y
+    size_t outer = x->numel / N;
+    const float *w = NULL;
+    if(pw && pw->value) w = pw->value->data;
+    // grad for weight/bias
+    if(pw && pw->requires_grad){
+        ensure_grad(pw);
+        // need xn = (x - mean)*rstd
+        for(size_t o=0;o<outer;o++){
+            const float *row = x->data + o*N;
+            const float *grow = g->data + o*N;
+            double sum=0; for(size_t i=0;i<N;i++) sum+=row[i];
+            float mean=(float)(sum/N);
+            double var=0; for(size_t i=0;i<N;i++){ double d=row[i]-mean; var+=d*d; } var/=N;
+            float rstd=1.0f/sqrtf((float)var + eps);
+            for(size_t i=0;i<N;i++){
+                float xn=(row[i]-mean)*rstd;
+                pw->grad->data[i] += grow[i] * xn;
+            }
+        }
+    }
+    if(pb && pb->requires_grad){
+        ensure_grad(pb);
+        for(size_t o=0;o<outer;o++){
+            const float *grow=g->data + o*N;
+            for(size_t i=0;i<N;i++) pb->grad->data[i] += grow[i];
+        }
+    }
+    if(!px->requires_grad) return;
+    ensure_grad(px);
+    // grad_x as per formula
+    for(size_t o=0;o<outer;o++){
+        const float *row=x->data + o*N;
+        const float *grow=g->data + o*N;
+        float *gxrow=px->grad->data + o*N;
+        double sum=0; for(size_t i=0;i<N;i++) sum+=row[i];
+        float mean=(float)(sum/N);
+        double var=0; for(size_t i=0;i<N;i++){ double d=row[i]-mean; var+=d*d; } var/=N;
+        float rstd=1.0f/sqrtf((float)var + eps);
+        float invN = 1.0f / (float)N;
+        // compute xn
+        // we can compute on fly
+        // need sums: sum_gw and sum_gw_xn
+        float sum_gw=0, sum_gw_xn=0;
+        for(size_t i=0;i<N;i++){
+            float gw = grow[i] * (w? w[i]:1.0f);
+            sum_gw += gw;
+            float xn=(row[i]-mean)*rstd;
+            sum_gw_xn += gw * xn;
+        }
+        for(size_t i=0;i<N;i++){
+            float xn=(row[i]-mean)*rstd;
+            float gw = grow[i] * (w? w[i]:1.0f);
+            float dx = rstd * (gw - invN*sum_gw - xn*invN*sum_gw_xn);
+            gxrow[i] += dx;
+        }
+    }
+}
+
+static void bwd_rmsnorm(pg_node *n){
+    rms_ctx_t *cx=(rms_ctx_t*)n->ctx;
+    size_t N=cx->N; float eps=cx->eps;
+    pg_node *px=n->parents[0];
+    pg_node *pw=cx->has_w && n->nparents>1? n->parents[1]:NULL;
+    const pg_tensor *x=px->value;
+    const pg_tensor *g=n->grad;
+    size_t outer=x->numel / N;
+    const float *w = (pw && pw->value)? pw->value->data:NULL;
+    if(pw && pw->requires_grad){
+        ensure_grad(pw);
+        for(size_t o=0;o<outer;o++){
+            const float *row=x->data+o*N;
+            const float *grow=g->data+o*N;
+            double sumsq=0; for(size_t i=0;i<N;i++) sumsq+=(double)row[i]*row[i];
+            float rstd=1.0f/sqrtf((float)(sumsq/N)+eps);
+            for(size_t i=0;i<N;i++) pw->grad->data[i] += grow[i] * row[i]*rstd;
+        }
+    }
+    if(!px->requires_grad) return;
+    ensure_grad(px);
+    for(size_t o=0;o<outer;o++){
+        const float *row=x->data+o*N;
+        const float *grow=g->data+o*N;
+        float *gxrow=px->grad->data+o*N;
+        double sumsq=0; for(size_t i=0;i<N;i++) sumsq+=(double)row[i]*row[i];
+        float var=(float)(sumsq/N);
+        float rstd=1.0f/sqrtf(var+eps);
+        float invN = 1.0f/(float)N;
+        // need sum_gw_x for rmsnorm grad
+        float sum_gw_x=0;
+        for(size_t i=0;i<N;i++){
+            float gw=grow[i]*(w?w[i]:1.0f);
+            sum_gw_x += gw * row[i];
+        }
+        float scale = rstd;
+        float coeff = - sum_gw_x * rstd * rstd * rstd * invN; // derivative of rstd w.r.t x includes sum term
+        // simplified formula: dx = rstd*gw - x * (rstd^3 * invN * sum_gw_x)
+        // where gw = grad_y * w
+        for(size_t i=0;i<N;i++){
+            float gw=grow[i]*(w?w[i]:1.0f);
+            float dx = gw * rstd + row[i] * coeff;
+            gxrow[i] += dx;
+        }
+    }
+}
+
+pg_node *pg_ag_layernorm(pg_node *x, pg_node *weight, pg_node *bias, float eps){
+    assert(x && x->value);
+    const pg_tensor *w = weight ? weight->value : NULL;
+    const pg_tensor *b = bias ? bias->value : NULL;
+    pg_tensor *v = pg_layernorm(x->value, w, b, eps);
+    if(!v) return NULL;
+    ln_ctx_t *cx=malloc(sizeof(*cx));
+    if(!cx){ pg_tensor_free(v); return NULL; }
+    cx->eps=eps;
+    cx->N=x->value->shape[x->value->ndim-1];
+    cx->has_w = weight != NULL;
+    cx->has_b = bias != NULL;
+    size_t npar = 1 + (weight?1:0) + (bias?1:0);
+    pg_node *pars[3]; size_t idx=0; pars[idx++]=x; if(weight) pars[idx++]=weight; if(bias) pars[idx++]=bias;
+    pg_node *r=attach(v, npar, pars, bwd_layernorm, cx);
+    if(!r) free(cx);
+    return r;
+}
+pg_node *pg_ag_rmsnorm(pg_node *x, pg_node *weight, float eps){
+    assert(x && x->value);
+    const pg_tensor *w = weight ? weight->value : NULL;
+    pg_tensor *v = pg_rmsnorm(x->value, w, eps);
+    if(!v) return NULL;
+    rms_ctx_t *cx=malloc(sizeof(*cx));
+    if(!cx){ pg_tensor_free(v); return NULL; }
+    cx->eps=eps; cx->N=x->value->shape[x->value->ndim-1];
+    cx->has_w = weight != NULL;
+    size_t npar = 1 + (weight?1:0);
+    pg_node *pars[2]; pars[0]=x; if(weight) pars[1]=weight;
+    pg_node *r=attach(v, npar, pars, bwd_rmsnorm, cx);
+    if(!r) free(cx);
     return r;
 }
 

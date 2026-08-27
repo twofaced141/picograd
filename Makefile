@@ -3,13 +3,14 @@
 CC       ?= cc
 AR       ?= ar
 
-CFLAGS   ?= -O2 -g
-CFLAGS   += -std=c11 -Wall -Wextra -mavx2 -fno-fast-math
+CFLAGS   ?= -O3 -g
+CFLAGS   += -std=c11 -Wall -Wextra -mavx2 -ffast-math -funroll-loops -ftree-vectorize
 CPPFLAGS += -Isrc -D_POSIX_C_SOURCE=200809L
 ASFLAGS  += -mavx2 -mavx512f
 
 LDFLAGS  +=
-LDLIBS   += -lm
+LDLIBS   += -lm -ldl -pthread
+CPPFLAGS += -pthread
 
 # MKL for benchmarks (Intel oneAPI)
 MKLROOT  ?= /opt/intel/oneapi/mkl/latest
@@ -18,15 +19,22 @@ MKLROOT  ?= /opt/intel/oneapi/mkl/latest
 SDE      ?= $(HOME)/tools/sde/sde
 SDE_CPU  ?= -spr
 
-# GPU backend: cpu (default) | cuda | metal
+# GPU backend: cpu (default) | cuda | metal | hip (rocm alias)
 # cuda uses CUDA Driver API via dlopen + embedded PTX kernels;
 # no CUDA toolkit is needed to build or run it, only the NVIDIA driver.
 # metal uses Metal.framework (Apple only); on non-Apple it builds as stub.
+# hip/rocm uses HIP runtime via dlopen + hiprtc runtime compilation;
+# no ROCm toolkit is needed to build, only the ROCm driver at run time.
 BACKEND   ?= cpu
+
+# rocm is an alias for hip
+ifeq ($(BACKEND),rocm)
+override BACKEND := hip
+endif
 
 BUILD    := build
 
-SRC      := $(shell find src -name '*.c' -not -path 'src/backend/cuda/*' -not -path 'src/backend/metal/*')
+SRC      := $(shell find src -name '*.c' -not -path 'src/backend/cuda/*' -not -path 'src/backend/metal/*' -not -path 'src/backend/hip/*')
 ASM      := $(shell find src -name '*.S')
 
 ifeq ($(BACKEND),cuda)
@@ -41,6 +49,12 @@ SRC      += $(wildcard src/backend/metal/*.c)
 ifeq ($(shell uname),Darwin)
 LDLIBS   += -framework Metal -framework Foundation -lobjc
 endif
+endif
+
+ifeq ($(BACKEND),hip)
+CPPFLAGS += -DPICOGRAD_BACKEND_HIP
+LDLIBS   += -ldl
+SRC      += $(wildcard src/backend/hip/*.c)
 endif
 
 OBJ      := $(patsubst %.c,$(BUILD)/%.o,$(filter %.c,$(SRC))) \
@@ -59,6 +73,9 @@ BENCH_GPU := $(BUILD)/bench_gemm_cuda
 endif
 ifeq ($(BACKEND),metal)
 BENCH_GPU := $(BUILD)/bench_gemm_metal
+endif
+ifeq ($(BACKEND),hip)
+BENCH_GPU := $(BUILD)/bench_gemm_hip
 endif
 
 .PHONY: all test examples bench bench-gpu test-sde clean
@@ -112,9 +129,15 @@ $(BENCH): benchmarks/bench_gemm.c $(LIB)
 bench: $(BENCH)
 	./$(BENCH)
 
-# GPU backend benchmark (requires BACKEND=cuda and a CUDA GPU)
+# GPU backend benchmark (requires BACKEND=cuda|metal|hip and a GPU)
 
-$(BENCH_GPU): benchmarks/bench_gemm_cuda.c $(LIB)
+$(BUILD)/bench_gemm_cuda: benchmarks/bench_gemm_cuda.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BUILD)/bench_gemm_metal: benchmarks/bench_gemm_cuda.c $(LIB)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BUILD)/bench_gemm_hip: benchmarks/bench_gemm_hip.c $(LIB)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
 bench-gpu: $(BENCH_GPU)

@@ -64,26 +64,15 @@ static int check_correct(size_t s)
     return maxerr > 0.05;
 }
 
-#if defined(PICOGRAD_BACKEND_METAL)
-#define PG_BENCH_DEV PG_DEV_METAL
-#define PG_BENCH_NAME "metal"
-#elif defined(PICOGRAD_BACKEND_HIP)
-#define PG_BENCH_DEV PG_DEV_HIP
-#define PG_BENCH_NAME "hip"
-#else
-#define PG_BENCH_DEV PG_DEV_CUDA
-#define PG_BENCH_NAME "cuda"
-#endif
-
 int main(void)
 {
-    if (pg_set_device(PG_BENCH_DEV) != PG_OK) {
-        printf("bench_gemm_" PG_BENCH_NAME ": " PG_BENCH_NAME " not available\n");
+    if (pg_set_device(PG_DEV_HIP) != PG_OK) {
+        printf("bench_gemm_hip: hip not available\n");
         return 1;
     }
 
     if (check_correct(512)) {
-        printf("bench_gemm_" PG_BENCH_NAME ": correctness check FAILED\n");
+        printf("bench_gemm_hip: correctness check FAILED\n");
         return 1;
     }
 

@@ -45,6 +45,10 @@ static const pg_backend_ops *ops_for(pg_devtype dev)
     case PG_DEV_METAL:
         return &pg_backend_metal;
 #endif
+#if defined(PICOGRAD_BACKEND_HIP)
+    case PG_DEV_HIP:
+        return &pg_backend_hip;
+#endif
     default:
         return NULL;
     }

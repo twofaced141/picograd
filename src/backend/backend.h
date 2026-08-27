@@ -17,6 +17,7 @@ typedef enum {
     PG_DEV_CUDA,
     PG_DEV_METAL,
     PG_DEV_HIP,
+    PG_DEV_ROCM = PG_DEV_HIP,
 } pg_devtype;
 
 typedef enum {

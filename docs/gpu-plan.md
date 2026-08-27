@@ -110,9 +110,14 @@ available — its kernels come almost for free on top of the CUDA path
     (bit-exact dyadic data). Zero-copy (device-resident tensors, no per-op copies) is deferred to M5
     as an optimization; current M3 uses per-op copies which keeps the hot loop logically on GPU.
 
-- [ ] **M4 — HIP/ROCm** (when AMD hardware is available)
-  dlopen libamdhip64.so, HSA path; M3 kernels ported via hipify.
-  Interface is ready; estimate 1–2 days.
+- [x] **M4 — HIP/ROCm** (27 Aug 2026, tested fallback on CPU-only host, needs AMD HW for full validation)
+  Done:
+  - driver loader: `src/backend/hip/driver.{h,c}` — dlopens `libamdhip64.so` (`/opt/rocm/lib/libamdhip64.so`) and `libhiprtc.so`, binds hip* + hiprtc* symbols, checks device count;
+  - backend: `src/backend/hip/hip.c` — `pg_backend_hip` table (init/malloc/copy/sync/gemm), hiprtc JIT at runtime for all kernels (same math as CUDA `device_kernels.c`), `pg_gpu` vtable (map/bin/accum_gather/scatter/sum_axis/softmax/copy_strided/fill/copy_d2d);
+  - kernels: single HIP source (`hip_kernel_source()`) compiled via hiprtc with `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel`; fallback to `PG_ERR_GEMM` if JIT fails (graceful CPU fallback); `Makefile` `BACKEND=hip` (`rocm` alias) adds `-DPICOGRAD_BACKEND_HIP -ldl` and builds `src/backend/hip/*.c`;
+  - CPU fallback preserved: `make BACKEND=hip` on a machine without ROCm returns `PG_ERR_UNSUPPORTED` from `pg_set_device(PG_DEV_HIP)` and all ops/tests/examples fall back to CPU (verified: `make BACKEND=hip test && ./build/train_xor` 4/4);
+  - benchmark `benchmarks/bench_gemm_hip.c` + `make BACKEND=hip bench-gpu`.
+  Performance expectation: same 64×64 4×4 tiled SGEMM as CUDA/Metal, ~20–30% of peak on RDNA/CDNA without further tuning.
 
 - [ ] **M5 — tail**
   Streams and pinned memory (async copies), index/gather/scatter,

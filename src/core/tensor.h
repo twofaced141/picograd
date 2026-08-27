@@ -17,9 +17,12 @@ typedef struct pg_tensor {
     size_t stride[PG_MAX_NDIM];
     size_t numel;
     float *data;
+    bool is_view;
+    struct pg_tensor *view_parent;
 } pg_tensor;
 
 pg_tensor *pg_tensor_new(size_t ndim, const size_t *shape);
+pg_tensor *pg_tensor_empty(size_t ndim, const size_t *shape);
 pg_tensor *pg_tensor_zeros(size_t ndim, const size_t *shape);
 pg_tensor *pg_tensor_ones(size_t ndim, const size_t *shape);
 pg_tensor *pg_tensor_full(size_t ndim, const size_t *shape, float value);
@@ -47,6 +50,16 @@ bool pg_shape_equal(size_t ndim_a, const size_t *shape_a, size_t ndim_b, const s
 
 bool pg_tensor_allclose(const pg_tensor *a, const pg_tensor *b, float rtol, float atol);
 void pg_tensor_print(const pg_tensor *t, FILE *out);
+
+// view (no copy, shared data) — caller must keep parent alive
+pg_tensor *pg_tensor_view(const pg_tensor *src);
+pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_t *shape);
+pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order);
+
+// buffer pool (aligned 64B)
+void pg_tensor_pool_clear(void);
+size_t pg_tensor_pool_size(void);
+size_t pg_tensor_pool_bytes(void);
 
 #ifdef __cplusplus
 }

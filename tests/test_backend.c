@@ -80,13 +80,13 @@ static void test_cpu_dispatch(void)
     CHECK(r[0] == 17.0f && r[1] == 39.0f);
 }
 
-static void test_device_roundtrip(void)
+static void test_one_device(pg_devtype dev, const char *name)
 {
-    if (pg_set_device(PG_DEV_CUDA) != PG_OK) {
-        printf("test_backend: cuda not available, skipping gpu part\n");
+    if (pg_set_device(dev) != PG_OK) {
+        printf("test_backend: %s not available, skipping\n", name);
         return;
     }
-    CHECK(pg_get_device() == PG_DEV_CUDA);
+    CHECK(pg_get_device() == dev);
 
     enum { M = 13, N = 9, K = 7, LDA = K, LDB = N, LDC = N };
 
@@ -107,7 +107,7 @@ static void test_device_roundtrip(void)
     pg_gemm(M, N, K, da, LDA, db, LDB, dc, LDC);
     CHECK(pg_dev_sync() == PG_OK);
     CHECK(pg_copy_d2h(hc, dc, M * N * sizeof(float)) == PG_OK);
-    check_result("cuda", M, N, K, LDC, hc, ha, LDA, hb, LDB);
+    check_result(name, M, N, K, LDC, hc, ha, LDA, hb, LDB);
 
     pg_dev_free(da);
     pg_dev_free(db);
@@ -118,6 +118,13 @@ static void test_device_roundtrip(void)
 
     CHECK(pg_set_device(PG_DEV_CPU) == PG_OK);
     CHECK(pg_get_device() == PG_DEV_CPU);
+}
+
+static void test_device_roundtrip(void)
+{
+    test_one_device(PG_DEV_CUDA, "cuda");
+    test_one_device(PG_DEV_HIP, "hip");
+    test_one_device(PG_DEV_METAL, "metal");
 }
 
 int main(void)
