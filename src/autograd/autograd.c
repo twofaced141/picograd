@@ -188,109 +188,69 @@ static bool try_accum_gpu(pg_tensor *dg, const pg_tensor *g, float scale)
     if (g->ndim > PG_MAX_OP_NDIM || dg->ndim > PG_MAX_OP_NDIM)
         return false;
 
-    /* fast path: shapes equal -> simple scaled add via bin? Use accum_scatter with identity */
+    /* Build strides for accum_scatter: for broadcast (or matching shape)
+     * dims where dst size is 1, the stride is 0 so all elements accumulate
+     * into a single dst element; otherwise use the dst tensor stride. */
+    pg_k_strides ar;
+    memset(&ar, 0, sizeof(ar));
+    ar.ndim = (unsigned)g->ndim;
+    ar.numel = (unsigned)g->numel;
+
     if (pg_shape_equal(dg->ndim, dg->shape, g->ndim, g->shape)) {
-        /* For equal shapes we can use a plain scaled add loop on GPU via bin+scale?
-         * Instead do direct device elementwise: dg += scale * g
-         * We can use pg_op_bin with MUL to compute scale*g then ADD, but that needs extra buffer.
-         * Simpler: use accum_scatter with identity mapping (s = stride).
-         */
-        pg_k_strides ar;
-        memset(&ar, 0, sizeof(ar));
-        ar.ndim = (unsigned)g->ndim;
-        ar.numel = (unsigned)g->numel;
         for (size_t d = 0; d < g->ndim; d++) {
             if (g->shape[d] > UINT_MAX || dg->stride[d] > UINT_MAX)
                 return false;
             ar.shape[d] = (unsigned)g->shape[d];
             ar.s[d] = (unsigned)dg->stride[d];
         }
-        /* But for equal contiguous case, dg->stride equals g->stride, so this works.
-         * For general strides (should be contiguous for grad), it still works. */
-        size_t bytes_dg = dg->numel * sizeof(float);
-        size_t bytes_g = g->numel * sizeof(float);
-        float *d_dg = pg_dev_malloc(bytes_dg ? bytes_dg : 1);
-        float *d_g = pg_dev_malloc(bytes_g ? bytes_g : 1);
-        if (!d_dg || !d_g) {
-            if (d_dg) pg_dev_free(d_dg);
-            if (d_g) pg_dev_free(d_g);
-            return false;
+    } else {
+        size_t off = g->ndim - dg->ndim;
+        for (size_t d = 0; d < g->ndim; d++) {
+            if (d < off) {
+                ar.shape[d] = (unsigned)g->shape[d];
+                continue;
+            }
+            size_t j = d - off;
+            if (dg->shape[j] > UINT_MAX || dg->stride[j] > UINT_MAX)
+                return false;
+            ar.shape[d] = (unsigned)g->shape[d];
+            ar.s[d] = dg->shape[j] == 1 ? 0 : (unsigned)dg->stride[j];
         }
-        if (pg_copy_h2d(d_g, g->data, bytes_g) != PG_OK ||
-            pg_copy_h2d(d_dg, dg->data, bytes_dg) != PG_OK) {
-            pg_dev_free(d_dg); pg_dev_free(d_g);
-            return false;
-        }
-        /* reuse accum_scatter: dst = dg, src = g */
-        pg_status st = pg_op_accum_scatter(d_dg, d_g, scale, &ar);
-        if (st != PG_OK) {
-            pg_dev_free(d_dg); pg_dev_free(d_g);
-            return false;
-        }
-        if (pg_dev_sync() != PG_OK) {
-            pg_dev_free(d_dg); pg_dev_free(d_g);
-            return false;
-        }
-        if (pg_copy_d2h(dg->data, d_dg, bytes_dg) != PG_OK) {
-            pg_dev_free(d_dg); pg_dev_free(d_g);
-            return false;
-        }
-        pg_dev_free(d_dg); pg_dev_free(d_g);
-        return true;
-    }
-
-    /* broadcast case */
-    size_t off = g->ndim - dg->ndim;
-    size_t proj[PG_MAX_NDIM];
-    for (size_t d = 0; d < g->ndim; d++) {
-        if (d < off) {
-            proj[d] = 0;
-            continue;
-        }
-        size_t j = d - off;
-        if (dg->shape[j] > UINT_MAX || dg->stride[j] > UINT_MAX)
-            return false;
-        proj[d] = dg->shape[j] == 1 ? 0 : dg->stride[j];
-        if (proj[d] > UINT_MAX) return false;
-    }
-    pg_k_strides ar;
-    memset(&ar, 0, sizeof(ar));
-    ar.ndim = (unsigned)g->ndim;
-    ar.numel = (unsigned)g->numel;
-    for (size_t d = 0; d < g->ndim; d++) {
-        if (g->shape[d] > UINT_MAX) return false;
-        ar.shape[d] = (unsigned)g->shape[d];
-        ar.s[d] = (unsigned)proj[d];
     }
 
     size_t bytes_dg = dg->numel * sizeof(float);
     size_t bytes_g = g->numel * sizeof(float);
-    float *d_dg = pg_dev_malloc(bytes_dg ? bytes_dg : 1);
-    float *d_g = pg_dev_malloc(bytes_g ? bytes_g : 1);
-    if (!d_dg || !d_g) {
-        if (d_dg) pg_dev_free(d_dg);
-        if (d_g) pg_dev_free(d_g);
+    pg_dev_buf ddg = pg_dev_buf_new(bytes_dg ? bytes_dg : 1);
+    pg_dev_buf ddst_g = pg_dev_buf_new(bytes_g ? bytes_g : 1);
+    if (!ddg.ptr || !ddst_g.ptr) {
+        pg_dev_buf_free(&ddg);
+        pg_dev_buf_free(&ddst_g);
         return false;
     }
-    if (pg_copy_h2d(d_g, g->data, bytes_g) != PG_OK ||
-        pg_copy_h2d(d_dg, dg->data, bytes_dg) != PG_OK) {
-        pg_dev_free(d_dg); pg_dev_free(d_g);
+    if (pg_copy_h2d(ddst_g.ptr, g->data, bytes_g) != PG_OK ||
+        pg_copy_h2d(ddg.ptr, dg->data, bytes_dg) != PG_OK) {
+        pg_dev_buf_free(&ddg);
+        pg_dev_buf_free(&ddst_g);
         return false;
     }
-    pg_status st = pg_op_accum_scatter(d_dg, d_g, scale, &ar);
+    pg_status st = pg_op_accum_scatter(ddg.ptr, ddst_g.ptr, scale, &ar);
     if (st != PG_OK) {
-        pg_dev_free(d_dg); pg_dev_free(d_g);
+        pg_dev_buf_free(&ddg);
+        pg_dev_buf_free(&ddst_g);
         return false;
     }
     if (pg_dev_sync() != PG_OK) {
-        pg_dev_free(d_dg); pg_dev_free(d_g);
+        pg_dev_buf_free(&ddg);
+        pg_dev_buf_free(&ddst_g);
         return false;
     }
-    if (pg_copy_d2h(dg->data, d_dg, bytes_dg) != PG_OK) {
-        pg_dev_free(d_dg); pg_dev_free(d_g);
+    if (pg_copy_d2h(dg->data, ddg.ptr, bytes_dg) != PG_OK) {
+        pg_dev_buf_free(&ddg);
+        pg_dev_buf_free(&ddst_g);
         return false;
     }
-    pg_dev_free(d_dg); pg_dev_free(d_g);
+    pg_dev_buf_free(&ddg);
+    pg_dev_buf_free(&ddst_g);
     return true;
 }
 
@@ -431,90 +391,39 @@ static void bwd_neg(pg_node *n)
     accum(n->parents[0], n->grad, -1.0f);
 }
 
-static void bwd_exp(pg_node *n)
+/* Generic backward for elementwise unary ops whose local gradient depends
+ * only on the op input value x = p->value and incoming grad g = n->grad. */
+typedef float (*pg_unary_local)(float x, size_t idx);
+
+static void bwd_unary_elemwise(pg_node *n, pg_unary_local local)
 {
     pg_node *p = n->parents[0];
     if (!p->requires_grad)
         return;
     ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++)
-        p->grad->data[i] += n->grad->data[i] * n->value->data[i];
+    pg_tensor *g = n->grad, *v = p->value, *pg = p->grad;
+    assert(g->numel == v->numel && pg->numel == g->numel);
+    for (size_t i = 0; i < g->numel; i++)
+        pg->data[i] += g->data[i] * local(v->data[i], i);
 }
 
-static void bwd_log(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++)
-        p->grad->data[i] += n->grad->data[i] / p->value->data[i];
-}
+static float grad_exp(float x, size_t idx)      { (void)idx; return expf(x); }
+static float grad_log(float x, size_t idx)      { (void)idx; return 1.0f / x; }
+static float grad_sqrt(float x, size_t idx)     { (void)idx; return 0.5f / sqrtf(x); }
+static float grad_sin(float x, size_t idx)      { (void)idx; return cosf(x); }
+static float grad_cos(float x, size_t idx)      { (void)idx; return -sinf(x); }
+static float grad_sigmoid(float x, size_t idx)   { (void)idx; { float s = 1.0f / (1.0f + expf(-x)); return s * (1.0f - s); } }
+static float grad_tanh(float x, size_t idx)     { (void)idx; { float t = tanhf(x); return 1.0f - t * t; } }
+static float grad_relu_local(float x, size_t idx) { (void)idx; return x > 0.0f ? 1.0f : 0.0f; }
 
-static void bwd_sqrt(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++)
-        p->grad->data[i] += 0.5f * n->grad->data[i] / n->value->data[i];
-}
-
-static void bwd_sin(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++)
-        p->grad->data[i] += n->grad->data[i] * cosf(p->value->data[i]);
-}
-
-static void bwd_cos(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++)
-        p->grad->data[i] -= n->grad->data[i] * sinf(p->value->data[i]);
-}
-
-static void bwd_relu(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++)
-        if (p->value->data[i] > 0.0f)
-            p->grad->data[i] += n->grad->data[i];
-}
-
-static void bwd_sigmoid(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++) {
-        float o = n->value->data[i];
-        p->grad->data[i] += n->grad->data[i] * o * (1.0f - o);
-    }
-}
-
-static void bwd_tanh(pg_node *n)
-{
-    pg_node *p = n->parents[0];
-    if (!p->requires_grad)
-        return;
-    ensure_grad(p);
-    for (size_t i = 0; i < p->grad->numel; i++) {
-        float o = n->value->data[i];
-        p->grad->data[i] += n->grad->data[i] * (1.0f - o * o);
-    }
-}
+static void bwd_exp(pg_node *n)  { bwd_unary_elemwise(n, grad_exp); }
+static void bwd_log(pg_node *n)   { bwd_unary_elemwise(n, grad_log); }
+static void bwd_sqrt(pg_node *n)  { bwd_unary_elemwise(n, grad_sqrt); }
+static void bwd_sin(pg_node *n)   { bwd_unary_elemwise(n, grad_sin); }
+static void bwd_cos(pg_node *n)   { bwd_unary_elemwise(n, grad_cos); }
+static void bwd_relu(pg_node *n)  { bwd_unary_elemwise(n, grad_relu_local); }
+static void bwd_sigmoid(pg_node *n) { bwd_unary_elemwise(n, grad_sigmoid); }
+static void bwd_tanh(pg_node *n)  { bwd_unary_elemwise(n, grad_tanh); }
 
 static void bwd_matmul(pg_node *n)
 {

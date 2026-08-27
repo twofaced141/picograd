@@ -193,3 +193,42 @@ pg_status pg_op_copy_d2d(void *dst, const void *src, size_t nbytes)
         return PG_ERR_UNSUPPORTED;
     return pg_gpu.copy_d2d(dst, src, nbytes);
 }
+
+/* GPU buffer helper */
+pg_dev_buf pg_dev_buf_new(size_t nbytes)
+{
+    pg_dev_buf buf = {0};
+    if (!nbytes)
+        return buf;
+    buf.ptr = pg_dev_malloc(nbytes);
+    buf.nbytes = nbytes;
+    return buf;
+}
+
+void pg_dev_buf_free(pg_dev_buf *buf)
+{
+    if (buf->ptr) {
+        pg_dev_free(buf->ptr);
+        buf->ptr = NULL;
+    }
+    buf->nbytes = 0;
+}
+
+/* GPU exec helper */
+pg_dev_exec pg_dev_exec_begin(pg_tensor *result)
+{
+    pg_dev_exec exec = {true, result};
+    return exec;
+}
+
+bool pg_dev_exec_check(pg_dev_exec *exec, bool condition)
+{
+    if (!condition)
+        exec->ok = false;
+    return exec->ok;
+}
+
+void pg_dev_exec_end(pg_dev_exec *exec)
+{
+    (void)exec;
+}

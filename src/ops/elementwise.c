@@ -58,52 +58,40 @@ static pg_tensor *try_bin_gpu(const pg_tensor *a, const pg_tensor *b, int bin_op
     size_t bytes_b = b->numel * sizeof(float);
     size_t bytes_out = out->numel * sizeof(float);
 
-    float *da = pg_dev_malloc(bytes_a ? bytes_a : 1);
-    float *db = pg_dev_malloc(bytes_b ? bytes_b : 1);
-    float *dc = pg_dev_malloc(bytes_out ? bytes_out : 1);
-    if (!da || !db || !dc) {
-        if (da) pg_dev_free(da);
-        if (db) pg_dev_free(db);
-        if (dc) pg_dev_free(dc);
+    pg_dev_buf da = pg_dev_buf_new(bytes_a ? bytes_a : 1);
+    pg_dev_buf db = pg_dev_buf_new(bytes_b ? bytes_b : 1);
+    pg_dev_buf dc = pg_dev_buf_new(bytes_out ? bytes_out : 1);
+    if (!da.ptr || !db.ptr || !dc.ptr) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
 
-    if (pg_copy_h2d(da, a->data, bytes_a) != PG_OK ||
-        pg_copy_h2d(db, b->data, bytes_b) != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+    if (pg_copy_h2d(da.ptr, a->data, bytes_a) != PG_OK ||
+        pg_copy_h2d(db.ptr, b->data, bytes_b) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
 
-    pg_status st = pg_op_bin(dc, da, db, out->numel, bin_op, &kargs);
+    pg_status st = pg_op_bin(dc.ptr, da.ptr, db.ptr, out->numel, bin_op, &kargs);
     if (st != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
     if (pg_dev_sync() != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_d2h(out->data, dc, bytes_out) != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+    if (pg_copy_d2h(out->data, dc.ptr, bytes_out) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
 
-    pg_dev_free(da);
-    pg_dev_free(db);
-    pg_dev_free(dc);
+    pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
     return out;
 }
 
@@ -189,41 +177,35 @@ static pg_tensor *try_map_gpu(const pg_tensor *a, int map_op)
     if (!out)
         return NULL;
     size_t bytes = a->numel * sizeof(float);
-    float *da = pg_dev_malloc(bytes ? bytes : 1);
-    float *dc = pg_dev_malloc(bytes ? bytes : 1);
-    if (!da || !dc) {
-        if (da) pg_dev_free(da);
-        if (dc) pg_dev_free(dc);
+    pg_dev_buf da = pg_dev_buf_new(bytes ? bytes : 1);
+    pg_dev_buf dc = pg_dev_buf_new(bytes ? bytes : 1);
+    if (!da.ptr || !dc.ptr) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_h2d(da, a->data, bytes) != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(dc);
+    if (pg_copy_h2d(da.ptr, a->data, bytes) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    pg_status st = pg_op_map(dc, da, a->numel, map_op);
+    pg_status st = pg_op_map(dc.ptr, da.ptr, a->numel, map_op);
     if (st != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(dc);
+        pg_dev_buf_free(&da); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
     if (pg_dev_sync() != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(dc);
+        pg_dev_buf_free(&da); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_d2h(out->data, dc, bytes) != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(dc);
+    if (pg_copy_d2h(out->data, dc.ptr, bytes) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    pg_dev_free(da);
-    pg_dev_free(dc);
+    pg_dev_buf_free(&da); pg_dev_buf_free(&dc);
     return out;
 }
 

@@ -1,7 +1,12 @@
 #ifndef PICOGRAD_BACKEND_H
 #define PICOGRAD_BACKEND_H
 
+#include <stdbool.h>
 #include <stddef.h>
+
+/* Forward declaration for GPU exec helper */
+struct pg_tensor;
+typedef struct pg_tensor pg_tensor;
 
 #ifdef __cplusplus
 extern "C" {
@@ -99,6 +104,44 @@ void pg_dev_free(void *p);
 pg_status pg_copy_h2d(void *dst, const void *src, size_t nbytes);
 pg_status pg_copy_d2h(void *dst, const void *src, size_t nbytes);
 pg_status pg_dev_sync(void);
+
+/* GPU buffer helper - RAII-like wrapper for device buffers */
+typedef struct {
+    float *ptr;
+    size_t nbytes;
+} pg_dev_buf;
+
+pg_dev_buf pg_dev_buf_new(size_t nbytes);
+void pg_dev_buf_free(pg_dev_buf *buf);
+
+/* Execute GPU operation with automatic cleanup on failure.
+ * Usage:
+ *   pg_dev_exec exec = pg_dev_exec_begin(numel * sizeof(float));
+ *   if (!exec.ok) return NULL;
+ *   
+ *   pg_dev_buf da = pg_dev_buf_new(...);
+ *   pg_dev_buf db = pg_dev_buf_new(...);
+ *   pg_dev_buf dc = pg_dev_buf_new(...);
+ *   if (!pg_dev_exec_check(&exec, da.ptr && db.ptr && dc.ptr)) goto cleanup;
+ *   
+ *   if (!pg_dev_exec_check(&exec, pg_copy_h2d(...) == PG_OK)) goto cleanup;
+ *   ...
+ *   
+ * cleanup:
+ *   pg_dev_buf_free(&da);
+ *   pg_dev_buf_free(&db);
+ *   pg_dev_buf_free(&dc);
+ *   pg_dev_exec_end(&exec);
+ *   return exec.ok ? result : NULL;
+ */
+typedef struct {
+    bool ok;
+    pg_tensor *result;
+} pg_dev_exec;
+
+pg_dev_exec pg_dev_exec_begin(pg_tensor *result);
+bool pg_dev_exec_check(pg_dev_exec *exec, bool condition);
+void pg_dev_exec_end(pg_dev_exec *exec);
 
 void pg_gemm(size_t m, size_t n, size_t k,
              const float *a, size_t lda,

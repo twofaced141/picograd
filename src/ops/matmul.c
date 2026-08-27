@@ -122,21 +122,17 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
     size_t bytes_a = a->numel * sizeof(float);
     size_t bytes_b = b->numel * sizeof(float);
     size_t bytes_out = out->numel * sizeof(float);
-    float *da = pg_dev_malloc(bytes_a ? bytes_a : 1);
-    float *db = pg_dev_malloc(bytes_b ? bytes_b : 1);
-    float *dc = pg_dev_malloc(bytes_out ? bytes_out : 1);
-    if (!da || !db || !dc) {
-        if (da) pg_dev_free(da);
-        if (db) pg_dev_free(db);
-        if (dc) pg_dev_free(dc);
+    pg_dev_buf da = pg_dev_buf_new(bytes_a ? bytes_a : 1);
+    pg_dev_buf db = pg_dev_buf_new(bytes_b ? bytes_b : 1);
+    pg_dev_buf dc = pg_dev_buf_new(bytes_out ? bytes_out : 1);
+    if (!da.ptr || !db.ptr || !dc.ptr) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_h2d(da, a->data, bytes_a) != PG_OK ||
-        pg_copy_h2d(db, b->data, bytes_b) != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+    if (pg_copy_h2d(da.ptr, a->data, bytes_a) != PG_OK ||
+        pg_copy_h2d(db.ptr, b->data, bytes_b) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
@@ -154,9 +150,9 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
     size_t ldb_b = bv ? b->stride[rb - 1] : b->stride[rb - 2];
     for (size_t s = 0; s < nbatch; s++) {
         pg_gemm(am, bn, ak,
-                da + oa, lda_a,
-                db + ob, ldb_b,
-                dc + s * am * bn, bn);
+                da.ptr + oa, lda_a,
+                db.ptr + ob, ldb_b,
+                dc.ptr + s * am * bn, bn);
         for (size_t d = bnd; d-- > 0;) {
             midx[d]++;
             oa += sa_bat[d];
@@ -170,22 +166,16 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
     }
 
     if (pg_dev_sync() != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_d2h(out->data, dc, bytes_out) != PG_OK) {
-        pg_dev_free(da);
-        pg_dev_free(db);
-        pg_dev_free(dc);
+    if (pg_copy_d2h(out->data, dc.ptr, bytes_out) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    pg_dev_free(da);
-    pg_dev_free(db);
-    pg_dev_free(dc);
+    pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
     return out;
 }
 
@@ -297,38 +287,36 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
     size_t bytes_a = a->numel * sizeof(float);
     size_t bytes_b = b->numel * sizeof(float);
     size_t bytes_out = out->numel * sizeof(float);
-    float *da = pg_dev_malloc(bytes_a ? bytes_a : 1);
-    float *db = pg_dev_malloc(bytes_b ? bytes_b : 1);
-    float *dc = pg_dev_malloc(bytes_out ? bytes_out : 1);
-    if (!da || !db || !dc) {
-        if (da) pg_dev_free(da);
-        if (db) pg_dev_free(db);
-        if (dc) pg_dev_free(dc);
+    pg_dev_buf da = pg_dev_buf_new(bytes_a ? bytes_a : 1);
+    pg_dev_buf db = pg_dev_buf_new(bytes_b ? bytes_b : 1);
+    pg_dev_buf dc = pg_dev_buf_new(bytes_out ? bytes_out : 1);
+    if (!da.ptr || !db.ptr || !dc.ptr) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_h2d(da, a->data, bytes_a) != PG_OK ||
-        pg_copy_h2d(db, b->data, bytes_b) != PG_OK) {
-        pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+    if (pg_copy_h2d(da.ptr, a->data, bytes_a) != PG_OK ||
+        pg_copy_h2d(db.ptr, b->data, bytes_b) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
     for (size_t s = 0; s < batch; s++)
         pg_gemm(m, n, k,
-                da + s * m * k, k,
-                db + s * k * n, n,
-                dc + s * m * n, n);
+                da.ptr + s * m * k, k,
+                db.ptr + s * k * n, n,
+                dc.ptr + s * m * n, n);
     if (pg_dev_sync() != PG_OK) {
-        pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_d2h(out->data, dc, bytes_out) != PG_OK) {
-        pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+    if (pg_copy_d2h(out->data, dc.ptr, bytes_out) != PG_OK) {
+        pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    pg_dev_free(da); pg_dev_free(db); pg_dev_free(dc);
+    pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
     return out;
 }
 
