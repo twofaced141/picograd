@@ -35,7 +35,10 @@ void pg_module_register(pg_module *m, pg_node *param)
     if (m->n == m->cap) {
         size_t nc = m->cap ? m->cap * 2 : 8;
         pg_node **np = realloc(m->params, nc * sizeof(*np));
-        assert(np);
+        if (!np) {
+            assert(np);
+            return;
+        }
         m->params = np;
         m->cap = nc;
     }

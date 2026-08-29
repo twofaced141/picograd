@@ -365,7 +365,16 @@ static bool is_direct(const jnode_t *in, size_t out_ndim, const size_t *out_shap
 /* reachable marking */
 static void mark_reachable(const pg_jit_graph *g, bool *reach){
     memset(reach,0,g->nnodes);
+    if (g->nnodes == 0)
+        return;
     int *stack = malloc(g->nnodes*sizeof(int));
+    if (!stack) {
+        for (size_t i=0;i<g->noutputs;i++){
+            int oid=g->outputs[i];
+            if ((size_t)oid < g->nnodes) reach[oid]=true;
+        }
+        return;
+    }
     size_t sp=0;
     for (size_t i=0;i<g->noutputs;i++){
         int oid=g->outputs[i];

@@ -184,7 +184,18 @@ void pg_node_free(pg_node *n)
     if (cap == 0) {
         cap = 16;
         stack = malloc(cap * sizeof(*stack));
-        assert(stack);
+        if (!stack) {
+            if (--n->refs)
+                return;
+            pg_tensor_free(n->value);
+            pg_tensor_free(n->grad);
+            free(n->ctx);
+            for (size_t i = 0; i < n->nparents; i++)
+                pg_node_free(n->parents[i]);
+            free(n->parents);
+            free(n);
+            return;
+        }
     }
     stack[sp++] = n;
 
@@ -197,11 +208,20 @@ void pg_node_free(pg_node *n)
         free(t->ctx);
         if (t->nparents) {
             if (sp + t->nparents > cap) {
-                while (sp + t->nparents > cap)
-                    cap *= 2;
-                pg_node **ns = realloc(stack, cap * sizeof(*ns));
-                assert(ns);
+                size_t need = sp + t->nparents;
+                size_t ncap = cap;
+                while (ncap < need)
+                    ncap *= 2;
+                pg_node **ns = realloc(stack, ncap * sizeof(*ns));
+                if (!ns) {
+                    for (size_t i = 0; i < t->nparents; i++)
+                        pg_node_free(t->parents[i]);
+                    free(t->parents);
+                    free(t);
+                    continue;
+                }
                 stack = ns;
+                cap = ncap;
             }
             for (size_t i = 0; i < t->nparents; i++)
                 stack[sp++] = t->parents[i];
@@ -1400,7 +1420,10 @@ static void vec_push(node_vec *v, pg_node *n)
     if (v->n == v->cap) {
         size_t nc = v->cap ? v->cap * 2 : 32;
         pg_node **ni = realloc(v->items, nc * sizeof(*ni));
-        assert(ni);
+        if (!ni) {
+            assert(ni);
+            return;
+        }
         v->items = ni;
         v->cap = nc;
     }
@@ -1420,10 +1443,15 @@ static void topo_sort(pg_node *root, node_vec *order)
     root->mark = 1;
     do {
         if (sp == cap) {
-            cap = cap ? cap * 2 : 32;
-            frame *ns = realloc(stk, cap * sizeof(*ns));
-            assert(ns);
+            size_t ncap = cap ? cap * 2 : 32;
+            frame *ns = realloc(stk, ncap * sizeof(*ns));
+            if (!ns) {
+                assert(ns);
+                free(stk);
+                return;
+            }
             stk = ns;
+            cap = ncap;
         }
         stk[sp].n = root;
         stk[sp].i = 0;
@@ -1437,10 +1465,14 @@ static void topo_sort(pg_node *root, node_vec *order)
             if (c->requires_grad && !c->mark) {
                 c->mark = 1;
                 if (sp == cap) {
-                    cap = cap ? cap * 2 : 32;
-                    frame *ns = realloc(stk, cap * sizeof(*ns));
-                    assert(ns);
+                    size_t ncap = cap ? cap * 2 : 32;
+                    frame *ns = realloc(stk, ncap * sizeof(*ns));
+                    if (!ns) {
+                        assert(ns);
+                        break;
+                    }
                     stk = ns;
+                    cap = ncap;
                 }
                 stk[sp].n = c;
                 stk[sp].i = 0;
@@ -1895,7 +1927,12 @@ static bool try_jit_suffix(pg_node *loss, node_vec *order, bool **out_handled) {
     }
     if (!eff_loss || eff_loss->ag_op==PG_AG_OP_NONE || !ag_op_is_jit_elementwise(eff_loss->ag_op)) {
         // suffix was empty? Still return true but no handled
-        *out_handled = calloc(order->n, sizeof(bool));
+        bool *h = calloc(order->n, sizeof(bool));
+        if (!h && order->n != 0) {
+            *out_handled = NULL;
+            return true;
+        }
+        *out_handled = h;
         return true;
     }
     size_t loop_ndim = eff_loss->value->ndim;
@@ -1903,7 +1940,7 @@ static bool try_jit_suffix(pg_node *loss, node_vec *order, bool **out_handled) {
     size_t loop_numel = eff_loss->value->numel;
     bool *in_suffix = calloc(order->n, sizeof(bool));
     int *queue = malloc(order->n * sizeof(int));
-    if (!in_suffix || !queue) { free(in_suffix); free(queue); *out_handled = calloc(order->n,sizeof(bool)); return true; }
+    if (!in_suffix || !queue) { free(in_suffix); free(queue); bool *h = calloc(order->n,sizeof(bool)); if (!h && order->n != 0) { *out_handled = NULL; return true; } *out_handled = h; return true; }
     int eff_idx = find_order_idx(order, eff_loss);
     if (eff_idx>=0) {
         size_t qh=0, qt=0;
