@@ -17,9 +17,10 @@ static void scale_(pg_tensor *t, float s)
 
 static pg_tensor *permute_copy(const pg_tensor *t, const size_t *order)
 {
+    if (!t || !t->data || !order) return NULL;
     size_t shape[PG_MAX_NDIM];
     for (size_t j = 0; j < t->ndim; j++) {
-        assert(order[j] < t->ndim);
+        if (order[j] >= t->ndim) return NULL;
         shape[j] = t->shape[order[j]];
     }
     pg_tensor *out = pg_tensor_empty(t->ndim, shape);
@@ -181,18 +182,17 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
 
 pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
 {
-    assert(a && b && a->data && b->data);
-    assert(a->ndim >= 1 && b->ndim >= 1);
+    if (!a || !b || !a->data || !b->data) return NULL;
+    if (a->ndim < 1 || b->ndim < 1) return NULL;
 
     pg_tensor *g = try_matmul_gpu(a, b);
     if (g) return g;
 
     size_t ra = a->ndim, rb = b->ndim;
     bool av = ra == 1, bv = rb == 1;
-    if (!bv)
-        assert(a->shape[ra - 1] == b->shape[rb - 2]);
-    assert(a->stride[ra - 1] == 1);
-    assert(bv || b->stride[rb - 1] == 1);
+    if (!bv && a->shape[ra - 1] != b->shape[rb - 2]) return NULL;
+    if (a->stride[ra - 1] != 1) return NULL;
+    if (!bv && b->stride[rb - 1] != 1) return NULL;
 
     size_t am = av ? 1 : a->shape[ra - 2];
     size_t ak = a->shape[ra - 1];
@@ -213,15 +213,18 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
         bnd = abn;
         bshape = a->shape;
     } else {
-        assert(abn == bbn);
-        assert(memcmp(a->shape, b->shape, abn * sizeof(size_t)) == 0);
+        if (abn != bbn) return NULL;
+        if (memcmp(a->shape, b->shape, abn * sizeof(size_t)) != 0) return NULL;
         bnd = abn;
         bshape = a->shape;
     }
 
     size_t nbatch = 1;
-    for (size_t d = 0; d < bnd; d++)
+    for (size_t d = 0; d < bnd; d++) {
+        if (bshape[d]==0) return NULL;
+        if (nbatch > SIZE_MAX / bshape[d]) return NULL;
         nbatch *= bshape[d];
+    }
 
     size_t rshape[PG_MAX_NDIM], rndim = 0;
     for (size_t d = 0; d < bnd; d++)
@@ -322,10 +325,10 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
 
 pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
 {
-    assert(a && b && a->data && b->data);
-    assert(a->ndim == 3 && b->ndim == 3);
-    assert(a->shape[0] == b->shape[0]);
-    assert(a->shape[2] == b->shape[1]);
+    if (!a || !b || !a->data || !b->data) return NULL;
+    if (a->ndim != 3 || b->ndim != 3) return NULL;
+    if (a->shape[0] != b->shape[0]) return NULL;
+    if (a->shape[2] != b->shape[1]) return NULL;
 
     pg_tensor *g = try_bmm_gpu(a, b);
     if (g) return g;
@@ -351,9 +354,9 @@ pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
 pg_tensor *pg_addmm(const pg_tensor *input, const pg_tensor *m1, const pg_tensor *m2,
                     float alpha, float beta)
 {
-    assert(input && m1 && m2 && input->data);
-    assert(m1->ndim == 2 && m2->ndim == 2);
-    assert(m1->shape[1] == m2->shape[0]);
+    if (!input || !m1 || !m2 || !input->data || !m1->data || !m2->data) return NULL;
+    if (m1->ndim != 2 || m2->ndim != 2) return NULL;
+    if (m1->shape[1] != m2->shape[0]) return NULL;
 
     size_t m = m1->shape[0];
     size_t n = m2->shape[1];
@@ -386,16 +389,16 @@ pg_tensor *pg_addmm(const pg_tensor *input, const pg_tensor *m1, const pg_tensor
 pg_tensor *pg_tensordot(const pg_tensor *a, const pg_tensor *b,
                         size_t ndims, const size_t *axes_a, const size_t *axes_b)
 {
-    assert(a && b && a->data && b->data && axes_a && axes_b);
-    assert(ndims >= 1 && ndims <= a->ndim && ndims <= b->ndim);
+    if (!a || !b || !a->data || !b->data || !axes_a || !axes_b) return NULL;
+    if (ndims < 1 || ndims > a->ndim || ndims > b->ndim) return NULL;
 
     size_t free_a = a->ndim - ndims;
     size_t rest_b = b->ndim - ndims;
-    assert(free_a + rest_b <= PG_MAX_NDIM);
+    if (free_a + rest_b > PG_MAX_NDIM) return NULL;
 
     for (size_t i = 0; i < ndims; i++) {
-        assert(axes_a[i] < a->ndim && axes_b[i] < b->ndim);
-        assert(a->shape[axes_a[i]] == b->shape[axes_b[i]]);
+        if (axes_a[i] >= a->ndim || axes_b[i] >= b->ndim) return NULL;
+        if (a->shape[axes_a[i]] != b->shape[axes_b[i]]) return NULL;
     }
 
     size_t pa[PG_MAX_NDIM], pb[PG_MAX_NDIM];
@@ -463,7 +466,6 @@ pg_tensor *pg_tensordot(const pg_tensor *a, const pg_tensor *b,
         fshape[j++] = 1;
 
     bool ok = pg_tensor_reshape(rc, j, fshape);
-    assert(ok);
-    (void)ok;
+    if (!ok) { pg_tensor_free(rc); return NULL; }
     return rc;
 }

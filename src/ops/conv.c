@@ -7,9 +7,11 @@
 pg_tensor *pg_conv2d(const pg_tensor *x, const pg_tensor *w, const pg_tensor *b,
                      pg_conv2d_cfg cfg)
 {
-    assert(x && w && x->data && w->data);
-    assert(x->ndim == 4 && w->ndim == 4);
-    assert(x->shape[1] == w->shape[1]);
+    if (!x || !w || !x->data || !w->data) return NULL;
+    if (x->ndim != 4 || w->ndim != 4) return NULL;
+    if (x->shape[1] != w->shape[1]) return NULL;
+    if (b && (!b->data || b->ndim != 1 || b->shape[0] != w->shape[0])) return NULL;
+    if (cfg.stride <= 0) return NULL;
 
     size_t N = x->shape[0];
     size_t Cin = x->shape[1];

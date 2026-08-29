@@ -27,9 +27,6 @@ typedef struct {
 } pg_pool_t;
 
 static pg_pool_t g_pool = {
-    .mu = PTHREAD_MUTEX_INITIALIZER,
-    .cv = PTHREAD_COND_INITIALIZER,
-    .done_cv = PTHREAD_COND_INITIALIZER,
     .head = NULL,
     .tail = NULL,
     .threads = NULL,
@@ -39,6 +36,7 @@ static pg_pool_t g_pool = {
 };
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static int g_init_done = 0;
+static int g_pool_inited = 0;
 
 int pg_hardware_concurrency(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
@@ -89,6 +87,12 @@ static void pool_init_once(void) {
         if (v >= 0) want = v;
     }
     if (want < 1) want = 1;
+    if (!g_pool_inited) {
+        pthread_mutex_init(&g_pool.mu, NULL);
+        pthread_cond_init(&g_pool.cv, NULL);
+        pthread_cond_init(&g_pool.done_cv, NULL);
+        g_pool_inited = 1;
+    }
     // For single core, no threads needed
     if (want == 1) {
         g_pool.nthreads = 1;
@@ -102,9 +106,6 @@ static void pool_init_once(void) {
         g_init_done = 1;
         return;
     }
-    pthread_mutex_init(&g_pool.mu, NULL);
-    pthread_cond_init(&g_pool.cv, NULL);
-    pthread_cond_init(&g_pool.done_cv, NULL);
     for (int i = 0; i < want; i++) {
         int rc = pthread_create(&g_pool.threads[i], NULL, worker_fn, NULL);
         if (rc != 0) {
@@ -150,9 +151,12 @@ void pg_thread_pool_fini(void) {
     }
     free(p->threads);
     p->threads = NULL;
-    pthread_mutex_destroy(&p->mu);
-    pthread_cond_destroy(&p->cv);
-    pthread_cond_destroy(&p->done_cv);
+    if (g_pool_inited) {
+        pthread_mutex_destroy(&p->mu);
+        pthread_cond_destroy(&p->cv);
+        pthread_cond_destroy(&p->done_cv);
+        g_pool_inited = 0;
+    }
     g_init_done = 0;
 }
 

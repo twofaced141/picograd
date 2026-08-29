@@ -30,11 +30,11 @@ static void layernorm_par(void *ctx, size_t s, size_t e){
 }
 
 pg_tensor *pg_layernorm(const pg_tensor *x, const pg_tensor *weight, const pg_tensor *bias, float eps){
-    assert(x && x->data);
-    assert(eps > 0);
+    if (!x || !x->data) return NULL;
+    if (eps <= 0 || x->ndim < 1) return NULL;
     size_t N = x->shape[x->ndim-1];
-    if(weight){ assert(weight->ndim==1 && weight->shape[0]==N); assert(weight->data); }
-    if(bias){ assert(bias->ndim==1 && bias->shape[0]==N); assert(bias->data); }
+    if(weight){ if(weight->ndim!=1 || weight->shape[0]!=N || !weight->data) return NULL; }
+    if(bias){ if(bias->ndim!=1 || bias->shape[0]!=N || !bias->data) return NULL; }
     pg_tensor *y = pg_tensor_empty(x->ndim, x->shape);
     if(!y) return NULL;
     size_t outer = x->numel / N;
@@ -76,9 +76,10 @@ static void rmsnorm_par(void *ctx, size_t s, size_t e){
 }
 
 pg_tensor *pg_rmsnorm(const pg_tensor *x, const pg_tensor *weight, float eps){
-    assert(x && x->data);
+    if (!x || !x->data || x->ndim < 1) return NULL;
+    if (eps <= 0) return NULL;
     size_t N=x->shape[x->ndim-1];
-    if(weight){ assert(weight->ndim==1 && weight->shape[0]==N); }
+    if(weight){ if(weight->ndim!=1 || weight->shape[0]!=N || !weight->data) return NULL; }
     pg_tensor *y=pg_tensor_empty(x->ndim, x->shape);
     if(!y) return NULL;
     size_t outer=x->numel / N;

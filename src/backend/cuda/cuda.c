@@ -30,18 +30,18 @@ static void cuda_register_gpu(void);
 static pg_status cuda_init(void)
 {
     static pg_status cached = PG_ERR_UNSUPPORTED;
-    static int done = 0;
+    static int ok = 0;
 
-    if (done)
+    if (ok)
         return cached;
-    done = 1;
 
     int debug = getenv("PG_CUDA_DEBUG") != NULL;
     pg_status err = PG_OK;
     const pg_cuda_drv *drv = pg_cuda_drv_get(&err);
     if (!drv) {
         if (debug) fprintf(stderr, "picograd/cuda: driver get failed %d\n", err);
-        return cached = err;
+        cached = err;
+        return cached;
     }
 
     int device;
@@ -49,22 +49,26 @@ static pg_status cuda_init(void)
     rc = drv->device_get(&device, 0);
     if (rc != 0) {
         if (debug) fprintf(stderr, "picograd/cuda: cuDeviceGet -> %d\n", rc);
-        return cached = PG_ERR_UNSUPPORTED;
+        cached = PG_ERR_UNSUPPORTED;
+        return cached;
     }
     rc = drv->ctx_create(&g_ctx, 0, device);
     if (rc != 0) {
         if (debug) fprintf(stderr, "picograd/cuda: cuCtxCreate -> %d\n", rc);
-        return cached = PG_ERR_UNSUPPORTED;
+        cached = PG_ERR_UNSUPPORTED;
+        return cached;
     }
     rc = drv->module_load_data(&g_module, sgemm_ptx);
     if (rc != 0) {
         if (debug) fprintf(stderr, "picograd/cuda: cuModuleLoadData sgemm -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
+        cached = PG_ERR_GEMM;
+        return cached;
     }
     rc = drv->module_get_function(&g_fn_sgemm, g_module, "pg_sgemm_kernel");
     if (rc != 0) {
         if (debug) fprintf(stderr, "picograd/cuda: cuModuleGetFunction sgemm -> %d\n", rc);
-        return cached = PG_ERR_GEMM;
+        cached = PG_ERR_GEMM;
+        return cached;
     }
 
     rc = drv->module_load_data(&g_ops_module, ops_ptx);
@@ -96,6 +100,7 @@ static pg_status cuda_init(void)
     }
 
     cached = PG_OK;
+    ok = 1;
     return cached;
 }
 
@@ -147,11 +152,10 @@ static void cuda_gemm(size_t m, size_t n, size_t k,
                       const float *b, size_t ldb,
                       float *c, size_t ldc)
 {
-    assert(lda == k && ldb == n && ldc == n);
-    assert(m <= 0xffffffffu && n <= 0xffffffffu && k <= 0xffffffffu);
+    if (lda != k || ldb != n || ldc != n) return;
+    if (m > 0xffffffffu || n > 0xffffffffu || k > 0xffffffffu) return;
 
     if (cuda_init() != PG_OK) {
-        assert(!"cuda backend not initialized");
         return;
     }
 

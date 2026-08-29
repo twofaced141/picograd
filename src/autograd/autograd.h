@@ -38,6 +38,12 @@ typedef enum {
     PG_AG_OP_CROSS_ENTROPY,
     PG_AG_OP_MSE,
     PG_AG_OP_BCE,
+    PG_AG_OP_POW,
+    PG_AG_OP_ABS,
+    PG_AG_OP_CLAMP,
+    PG_AG_OP_GELU,
+    PG_AG_OP_LEAKY_RELU,
+    PG_AG_OP_ERF,
     PG_AG_OP_COUNT
 } pg_ag_op_t;
 
@@ -95,6 +101,13 @@ pg_node *pg_ag_cos(pg_node *a);
 pg_node *pg_ag_relu(pg_node *a);
 pg_node *pg_ag_sigmoid(pg_node *a);
 pg_node *pg_ag_tanh(pg_node *a);
+
+pg_node *pg_ag_pow(pg_node *a, pg_node *b);
+pg_node *pg_ag_abs(pg_node *a);
+pg_node *pg_ag_clamp(pg_node *a, float lo, float hi);
+pg_node *pg_ag_gelu(pg_node *a);
+pg_node *pg_ag_leaky_relu(pg_node *a, float alpha);
+pg_node *pg_ag_erf(pg_node *a);
 
 pg_node *pg_ag_matmul(pg_node *a, pg_node *b);
 

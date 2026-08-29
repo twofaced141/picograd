@@ -22,8 +22,8 @@ static void advance(size_t *midx, const size_t *shape, size_t ndim)
 
 pg_tensor *pg_gather(const pg_tensor *t, size_t axis, const pg_tensor *indices)
 {
-    assert(t && indices && t->data && indices->data);
-    assert(indices->ndim == t->ndim && axis < t->ndim);
+    if (!t || !indices || !t->data || !indices->data) return NULL;
+    if (indices->ndim != t->ndim || axis >= t->ndim) return NULL;
     if (!indices_valid(indices, t->shape[axis]))
         return NULL;
 
@@ -46,10 +46,10 @@ pg_tensor *pg_gather(const pg_tensor *t, size_t axis, const pg_tensor *indices)
 
 pg_tensor *pg_scatter(const pg_tensor *t, size_t axis, const pg_tensor *indices, const pg_tensor *src)
 {
-    assert(t && indices && src && t->data && indices->data && src->data);
-    assert(indices->ndim == t->ndim && axis < t->ndim);
-    assert(indices->ndim == src->ndim);
-    assert(memcmp(indices->shape, src->shape, indices->ndim * sizeof(size_t)) == 0);
+    if (!t || !indices || !src || !t->data || !indices->data || !src->data) return NULL;
+    if (indices->ndim != t->ndim || axis >= t->ndim) return NULL;
+    if (indices->ndim != src->ndim) return NULL;
+    if (memcmp(indices->shape, src->shape, indices->ndim * sizeof(size_t)) != 0) return NULL;
     if (!indices_valid(indices, t->shape[axis]))
         return NULL;
 
@@ -72,8 +72,8 @@ pg_tensor *pg_scatter(const pg_tensor *t, size_t axis, const pg_tensor *indices,
 
 pg_tensor *pg_embedding(const pg_tensor *weight, const pg_tensor *indices)
 {
-    assert(weight && indices && weight->data && indices->data);
-    assert(weight->ndim == 2);
+    if (!weight || !indices || !weight->data || !indices->data) return NULL;
+    if (weight->ndim != 2) return NULL;
     size_t V = weight->shape[0], E = weight->shape[1];
 
     for (size_t i = 0; i < indices->numel; i++) {
@@ -83,7 +83,7 @@ pg_tensor *pg_embedding(const pg_tensor *weight, const pg_tensor *indices)
     }
 
     size_t shape[PG_MAX_NDIM];
-    assert(indices->ndim + 1 <= PG_MAX_NDIM);
+    if (indices->ndim + 1 > PG_MAX_NDIM) return NULL;
     memcpy(shape, indices->shape, indices->ndim * sizeof(size_t));
     shape[indices->ndim] = E;
     size_t ndim = indices->ndim + 1;
@@ -101,8 +101,8 @@ pg_tensor *pg_embedding(const pg_tensor *weight, const pg_tensor *indices)
 
 pg_tensor *pg_index_select(const pg_tensor *t, size_t axis, const pg_tensor *indices)
 {
-    assert(t && indices && t->data && indices->data);
-    assert(t->ndim >= 1 && axis < t->ndim && indices->ndim == 1);
+    if (!t || !indices || !t->data || !indices->data) return NULL;
+    if (t->ndim < 1 || axis >= t->ndim || indices->ndim != 1) return NULL;
     if (!indices_valid(indices, t->shape[axis]))
         return NULL;
 
@@ -127,8 +127,8 @@ pg_tensor *pg_index_select(const pg_tensor *t, size_t axis, const pg_tensor *ind
 
 pg_tensor *pg_masked_select(const pg_tensor *t, const pg_tensor *mask)
 {
-    assert(t && mask && t->data && mask->data);
-    assert(pg_shape_equal(t->ndim, t->shape, mask->ndim, mask->shape));
+    if (!t || !mask || !t->data || !mask->data) return NULL;
+    if (!pg_shape_equal(t->ndim, t->shape, mask->ndim, mask->shape)) return NULL;
 
     size_t n = 0;
     for (size_t i = 0; i < t->numel; i++)

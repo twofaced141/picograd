@@ -92,6 +92,41 @@ void pg_tensor_pool_clear(void) {
 size_t pg_tensor_pool_size(void) { size_t c; pthread_mutex_lock(&g_pool_mu); c=g_pool_count; pthread_mutex_unlock(&g_pool_mu); return c; }
 size_t pg_tensor_pool_bytes(void) { size_t b; pthread_mutex_lock(&g_pool_mu); b=g_pool_bytes; pthread_mutex_unlock(&g_pool_mu); return b; }
 
+static pg_data_ref *data_ref_create(float *ptr, size_t nbytes) {
+    pg_data_ref *r = (pg_data_ref*)malloc(sizeof(*r));
+    if (!r) return NULL;
+    r->ptr = ptr;
+    r->nbytes = nbytes;
+    r->refs = 1;
+    return r;
+}
+static void data_ref_retain(pg_data_ref *r) {
+    if (r) __sync_fetch_and_add(&r->refs, 1);
+}
+static void data_ref_release(pg_data_ref *r) {
+    if (!r) return;
+    if (__sync_sub_and_fetch(&r->refs, 1) == 0) {
+        if (r->ptr) {
+            pthread_mutex_lock(&g_pool_mu);
+            if (g_pool_count >= PG_POOL_MAX_COUNT || g_pool_bytes + r->nbytes > PG_POOL_MAX_BYTES) {
+                pthread_mutex_unlock(&g_pool_mu);
+                free(r->ptr);
+            } else {
+                pool_entry_t *e = (pool_entry_t*)malloc(sizeof(*e));
+                if (!e) { pthread_mutex_unlock(&g_pool_mu); free(r->ptr); free(r); return; }
+                e->ptr = r->ptr;
+                e->nbytes = r->nbytes;
+                e->next = g_pool_head;
+                g_pool_head = e;
+                g_pool_count++;
+                g_pool_bytes += r->nbytes;
+                pthread_mutex_unlock(&g_pool_mu);
+            }
+        }
+        free(r);
+    }
+}
+
 static bool valid_shape(size_t ndim, const size_t *shape)
 {
     if (ndim == 0 || ndim > PG_MAX_NDIM || shape == NULL)
@@ -136,7 +171,10 @@ pg_tensor *pg_tensor_new(size_t ndim, const size_t *shape)
         if (!data) { free(t); return NULL; }
     }
     memset(data, 0, nbytes);
+    pg_data_ref *ref = data_ref_create(data, nbytes);
+    if (!ref) { pool_release(data, nbytes); free(t); return NULL; }
     t->data = data;
+    t->data_ref = ref;
     t->is_view = false;
     t->view_parent = NULL;
 
@@ -165,7 +203,10 @@ pg_tensor *pg_tensor_empty(size_t ndim, const size_t *shape)
         data = (float*)pg_aligned_alloc(nbytes);
         if (!data) { free(t); return NULL; }
     }
+    pg_data_ref *ref = data_ref_create(data, nbytes);
+    if (!ref) { pool_release(data, nbytes); free(t); return NULL; }
     t->data = data;
+    t->data_ref = ref;
     t->is_view = false;
     t->view_parent = NULL;
     t->ndim = ndim;
@@ -179,15 +220,7 @@ void pg_tensor_free(pg_tensor *t)
 {
     if (!t)
         return;
-    if (t->is_view) {
-        // view does not own data
-        free(t);
-        return;
-    }
-    if (t->data) {
-        size_t nbytes = t->numel * sizeof(float);
-        pool_release(t->data, nbytes);
-    }
+    if (t->data_ref) data_ref_release(t->data_ref);
     free(t);
 }
 
@@ -235,16 +268,21 @@ pg_tensor *pg_tensor_arange(float start, float stop, float step)
 }
 
 static unsigned long long rng_state = 0x9E3779B97F4A7C15ULL;
+static pthread_mutex_t g_rng_mu = PTHREAD_MUTEX_INITIALIZER;
 
 void pg_seed(unsigned long long seed)
 {
+    pthread_mutex_lock(&g_rng_mu);
     rng_state = seed != 0 ? seed : 0x9E3779B97F4A7C15ULL;
+    pthread_mutex_unlock(&g_rng_mu);
 }
 
 static unsigned long long rng_next(void)
 {
+    pthread_mutex_lock(&g_rng_mu);
     rng_state += 0x9E3779B97F4A7C15ULL;
     unsigned long long z = rng_state;
+    pthread_mutex_unlock(&g_rng_mu);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
@@ -315,7 +353,7 @@ pg_tensor *pg_tensor_eye(size_t n)
 
 pg_tensor *pg_tensor_clone(const pg_tensor *t)
 {
-    assert(t && t->data);
+    if (!t || !t->data) return NULL;
     return pg_tensor_from_data(t->ndim, t->shape, t->data);
 }
 
@@ -426,12 +464,13 @@ static void print_rec(const pg_tensor *t, size_t dim, size_t offset, FILE *out)
 }
 
 pg_tensor *pg_tensor_view(const pg_tensor *src) {
-    if (!src || !src->data) return NULL;
+    if (!src || !src->data || !src->data_ref) return NULL;
     pg_tensor *v = (pg_tensor*)malloc(sizeof(*v));
     if (!v) return NULL;
     memcpy(v, src, sizeof(*v));
     v->is_view = true;
     v->view_parent = (pg_tensor*)src;
+    data_ref_retain(v->data_ref);
     return v;
 }
 pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_t *shape) {

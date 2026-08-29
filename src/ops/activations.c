@@ -30,7 +30,7 @@ static void sm1_par_fn(void *ctx, size_t s, size_t e){
 
 static pg_tensor *map_inplace(const pg_tensor *a, float (*f)(float))
 {
-    assert(a && a->data);
+    if (!a || !a->data || !f) return NULL;
     pg_tensor *r = pg_tensor_clone(a);
     if (!r)
         return NULL;
@@ -159,7 +159,7 @@ pg_tensor *pg_gelu(const pg_tensor *a)
 
 pg_tensor *pg_leaky_relu(const pg_tensor *a, float alpha)
 {
-    assert(a && a->data);
+    if (!a || !a->data) return NULL;
     pg_tensor *r = pg_tensor_clone(a);
     if (!r)
         return NULL;
@@ -177,7 +177,7 @@ pg_tensor *pg_leaky_relu(const pg_tensor *a, float alpha)
 
 static pg_tensor *softmax_impl(const pg_tensor *t, size_t axis, bool log)
 {
-    assert(t && t->data && axis < t->ndim);
+    if (!t || !t->data || axis >= t->ndim) return NULL;
 
     size_t outer, len, inner;
     pg_axis_split(t->ndim, t->shape, axis, &outer, &len, &inner);

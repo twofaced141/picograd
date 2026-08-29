@@ -65,7 +65,7 @@ static size_t line_base(const pg_tensor *t, const size_t *idx, size_t axis)
 
 static pg_tensor *cumulate(const pg_tensor *t, size_t axis, bool prod)
 {
-    assert(t && t->data && t->ndim >= 1 && axis < t->ndim);
+    if (!t || !t->data || t->ndim < 1 || axis >= t->ndim) return NULL;
 
     pg_tensor *out = pg_tensor_clone(t);
     if (!out)
@@ -118,8 +118,8 @@ static void fill_out_shape(const pg_tensor *t, size_t axis, bool keep, size_t k,
 static pg_kv sort_topk_impl(const pg_tensor *t, size_t axis, size_t take, bool descending)
 {
     pg_kv kv = {NULL, NULL};
-    assert(t && t->data && t->ndim >= 1 && axis < t->ndim);
-    assert(take >= 1 && take <= t->shape[axis]);
+    if (!t || !t->data || t->ndim < 1 || axis >= t->ndim) return kv;
+    if (take < 1 || take > t->shape[axis]) return kv;
 
     size_t shape[PG_MAX_NDIM], ondim;
     fill_out_shape(t, axis, true, take, shape, &ondim);
@@ -166,7 +166,8 @@ fail:
 
 pg_kv pg_sort(const pg_tensor *t, size_t axis, bool descending)
 {
-    return sort_topk_impl(t, axis, t ? t->shape[axis] : 0, descending);
+    if (!t || !t->data || t->ndim < 1 || axis >= t->ndim) { pg_kv kv={NULL,NULL}; return kv; }
+    return sort_topk_impl(t, axis, t->shape[axis], descending);
 }
 
 pg_kv pg_topk(const pg_tensor *t, size_t axis, size_t k)

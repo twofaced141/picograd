@@ -248,6 +248,9 @@ static bool try_accum_gpu(pg_tensor *dg, const pg_tensor *g, float scale)
         return false;
     if (g->ndim > PG_MAX_OP_NDIM || dg->ndim > PG_MAX_OP_NDIM)
         return false;
+    // small tensors: H2D/D2H overhead dominates, stay on CPU
+    if (g->numel < 65536 && dg->numel < 65536)
+        return false;
 
     /* Build strides for accum_scatter: for broadcast (or matching shape)
      * dims where dst size is 1, the stride is 0 so all elements accumulate
@@ -409,41 +412,76 @@ static void bwd_sub(pg_node *n)
     accum(n->parents[1], n->grad, -1.0f);
 }
 
+static inline bool ag_is_contiguous(const pg_tensor *t) {
+    size_t acc=1;
+    for (size_t i=t->ndim; i-- >0;) {
+        if (t->stride[i]!=acc) return false;
+        acc*=t->shape[i];
+    }
+    return true;
+}
 static void bwd_mul(pg_node *n)
 {
     pg_node *pa = n->parents[0], *pb = n->parents[1];
-    if (pa->requires_grad) {
-        pg_tensor *t = pg_mul(n->grad, pb->value);
-        assert(t);
-        accum(pa, t, 1.0f);
-        pg_tensor_free(t);
+    const pg_tensor *g = n->grad;
+    // fast path: all same shape contiguous
+    if (pa->requires_grad && pg_shape_equal(pa->value->ndim, pa->value->shape, g->ndim, g->shape) &&
+        pg_shape_equal(pb->value->ndim, pb->value->shape, g->ndim, g->shape) &&
+        ag_is_contiguous(pa->value) && ag_is_contiguous(pb->value) && ag_is_contiguous(g) && ag_is_contiguous(pa->grad ? pa->grad : pa->value)) {
+        // direct without alloc if pa grad already allocated or can be ensured
+        if (pa->grad || pa->requires_grad) {
+            ensure_grad(pa);
+            for (size_t i=0;i<g->numel;i++) pa->grad->data[i] += g->data[i] * pb->value->data[i];
+        }
+    } else if (pa->requires_grad) {
+        pg_tensor *t = pg_mul(g, pb->value);
+        if (t) { accum(pa, t, 1.0f); pg_tensor_free(t); }
     }
-    if (pb->requires_grad) {
-        pg_tensor *t = pg_mul(n->grad, pa->value);
-        assert(t);
-        accum(pb, t, 1.0f);
-        pg_tensor_free(t);
+    if (pb->requires_grad && pg_shape_equal(pb->value->ndim, pb->value->shape, g->ndim, g->shape) &&
+        pg_shape_equal(pa->value->ndim, pa->value->shape, g->ndim, g->shape) &&
+        ag_is_contiguous(pa->value) && ag_is_contiguous(pb->value) && ag_is_contiguous(g)) {
+        ensure_grad(pb);
+        for (size_t i=0;i<g->numel;i++) pb->grad->data[i] += g->data[i] * pa->value->data[i];
+    } else if (pb->requires_grad) {
+        pg_tensor *t = pg_mul(g, pa->value);
+        if (t) { accum(pb, t, 1.0f); pg_tensor_free(t); }
     }
 }
 
 static void bwd_div(pg_node *n)
 {
     pg_node *pa = n->parents[0], *pb = n->parents[1];
+    const pg_tensor *g = n->grad;
     if (pa->requires_grad) {
-        pg_tensor *t = pg_div(n->grad, pb->value);
-        assert(t);
-        accum(pa, t, 1.0f);
-        pg_tensor_free(t);
+        if (pg_shape_equal(pa->value->ndim, pa->value->shape, g->ndim, g->shape) &&
+            pg_shape_equal(pb->value->ndim, pb->value->shape, g->ndim, g->shape) &&
+            ag_is_contiguous(g) && ag_is_contiguous(pb->value) && ag_is_contiguous(pa->value)) {
+            ensure_grad(pa);
+            for (size_t i=0;i<g->numel;i++) pa->grad->data[i] += g->data[i] / pb->value->data[i];
+        } else {
+            pg_tensor *t = pg_div(g, pb->value);
+            if (t) { accum(pa, t, 1.0f); pg_tensor_free(t); }
+        }
     }
     if (pb->requires_grad) {
-        pg_tensor *d = pg_mul(pb->value, pb->value);
-        pg_tensor *num = pg_mul(n->grad, pa->value);
-        pg_tensor *t = num ? pg_div(num, d) : NULL;
-        assert(t);
-        accum(pb, t, -1.0f);
-        pg_tensor_free(d);
-        pg_tensor_free(num);
-        pg_tensor_free(t);
+        if (pg_shape_equal(pa->value->ndim, pa->value->shape, g->ndim, g->shape) &&
+            pg_shape_equal(pb->value->ndim, pb->value->shape, g->ndim, g->shape) &&
+            ag_is_contiguous(g) && ag_is_contiguous(pa->value) && ag_is_contiguous(pb->value)) {
+            ensure_grad(pb);
+            for (size_t i=0;i<g->numel;i++) {
+                float b = pb->value->data[i];
+                float grad = - g->data[i] * pa->value->data[i] / (b*b);
+                if (isfinite(grad)) pb->grad->data[i] += grad;
+            }
+        } else {
+            pg_tensor *d = pg_mul(pb->value, pb->value);
+            pg_tensor *num = d ? pg_mul(g, pa->value) : NULL;
+            pg_tensor *t = (num && d) ? pg_div(num, d) : NULL;
+            if (t) accum(pb, t, -1.0f);
+            pg_tensor_free(d);
+            pg_tensor_free(num);
+            if (t) pg_tensor_free(t);
+        }
     }
 }
 
@@ -683,6 +721,113 @@ UNARY_OP(pg_ag_cos, pg_cos, bwd_cos, PG_AG_OP_COS)
 UNARY_OP(pg_ag_relu, pg_relu, bwd_relu, PG_AG_OP_RELU)
 UNARY_OP(pg_ag_sigmoid, pg_sigmoid, bwd_sigmoid, PG_AG_OP_SIGMOID)
 UNARY_OP(pg_ag_tanh, pg_tanh, bwd_tanh, PG_AG_OP_TANH)
+
+static float grad_abs(float x, size_t idx) { (void)idx; return x > 0 ? 1.0f : (x < 0 ? -1.0f : 0.0f); }
+static float grad_erf(float x, size_t idx) { (void)idx; return 1.12837916709551f * expf(-x*x); }
+static float grad_gelu(float x, size_t idx) {
+    (void)idx;
+    const float sqrt_2pi = 2.50662827463f;
+    const float inv_sqrt2 = 0.70710678118f;
+    float erf_term = erff(x * inv_sqrt2);
+    float phi = expf(-0.5f * x * x) / sqrt_2pi;
+    return 0.5f * (1.0f + erf_term) + x * phi;
+}
+static void bwd_abs(pg_node *n)  { bwd_unary_elemwise(n, grad_abs); }
+static void bwd_erf(pg_node *n)  { bwd_unary_elemwise(n, grad_erf); }
+static void bwd_gelu(pg_node *n) { bwd_unary_elemwise(n, grad_gelu); }
+
+typedef struct { float lo; float hi; } clamp_ctx_t;
+static void bwd_clamp(pg_node *n) {
+    clamp_ctx_t *cx = (clamp_ctx_t*)n->ctx;
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad) return;
+    ensure_grad(p);
+    pg_tensor *g = n->grad, *v = p->value, *pg = p->grad;
+    for (size_t i=0;i<g->numel;i++) {
+        float x = v->data[i];
+        if (x >= cx->lo && x <= cx->hi) pg->data[i] += g->data[i];
+    }
+}
+typedef struct { float alpha; } leaky_ctx_t;
+static void bwd_leaky(pg_node *n) {
+    leaky_ctx_t *cx = (leaky_ctx_t*)n->ctx;
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad) return;
+    ensure_grad(p);
+    pg_tensor *g = n->grad, *v = p->value, *pg = p->grad;
+    for (size_t i=0;i<g->numel;i++) {
+        float x = v->data[i];
+        pg->data[i] += g->data[i] * (x > 0 ? 1.0f : cx->alpha);
+    }
+}
+static void bwd_pow(pg_node *n) {
+    pg_node *pa = n->parents[0], *pb = n->parents[1];
+    const pg_tensor *a = pa->value, *b = pb->value;
+    const pg_tensor *g = n->grad;
+    if (pa->requires_grad) {
+        pg_tensor *one = pg_tensor_full(1, (size_t[]){1}, 1.0f);
+        pg_tensor *b_minus1 = one ? pg_sub(b, one) : NULL;
+        if (one) pg_tensor_free(one);
+        pg_tensor *a_pow = b_minus1 ? pg_pow(a, b_minus1) : NULL;
+        if (b_minus1) pg_tensor_free(b_minus1);
+        if (a_pow) {
+            pg_tensor *tmp1 = pg_mul(b, a_pow);
+            if (tmp1) {
+                pg_tensor *grad_a = pg_mul(g, tmp1);
+                if (grad_a) { accum(pa, grad_a, 1.0f); pg_tensor_free(grad_a); }
+                pg_tensor_free(tmp1);
+            }
+            pg_tensor_free(a_pow);
+        }
+    }
+    if (pb->requires_grad) {
+        // grad_b = g * a^b * log(a)
+        pg_tensor *log_a = pg_log(a);
+        if (!log_a) return;
+        pg_tensor *pow_val = pg_pow(a, b);
+        if (!pow_val) { pg_tensor_free(log_a); return; }
+        pg_tensor *tmp = pg_mul(pow_val, log_a);
+        pg_tensor *grad_b_un = NULL;
+        if (tmp) grad_b_un = pg_mul(g, tmp);
+        if (grad_b_un) { accum(pb, grad_b_un, 1.0f); pg_tensor_free(grad_b_un); }
+        pg_tensor_free(tmp);
+        pg_tensor_free(pow_val);
+        pg_tensor_free(log_a);
+    }
+}
+
+pg_node *pg_ag_pow(pg_node *a, pg_node *b) {
+    if (!a || !b || !a->value || !b->value) return NULL;
+    pg_tensor *v = pg_pow(a->value, b->value);
+    if (!v) return NULL;
+    return attach(v, 2, (pg_node*[]){a,b}, bwd_pow, NULL, PG_AG_OP_POW);
+}
+UNARY_OP(pg_ag_abs, pg_abs, bwd_abs, PG_AG_OP_ABS)
+UNARY_OP(pg_ag_erf, pg_erf, bwd_erf, PG_AG_OP_ERF)
+UNARY_OP(pg_ag_gelu, pg_gelu, bwd_gelu, PG_AG_OP_GELU)
+pg_node *pg_ag_clamp(pg_node *a, float lo, float hi) {
+    if (!a || !a->value) return NULL;
+    if (lo > hi) return NULL;
+    pg_tensor *v = pg_clamp(a->value, lo, hi);
+    if (!v) return NULL;
+    clamp_ctx_t *cx = malloc(sizeof(*cx));
+    if (!cx) { pg_tensor_free(v); return NULL; }
+    cx->lo = lo; cx->hi = hi;
+    pg_node *r = attach(v, 1, &a, bwd_clamp, cx, PG_AG_OP_CLAMP);
+    if (!r) free(cx);
+    return r;
+}
+pg_node *pg_ag_leaky_relu(pg_node *a, float alpha) {
+    if (!a || !a->value) return NULL;
+    pg_tensor *v = pg_leaky_relu(a->value, alpha);
+    if (!v) return NULL;
+    leaky_ctx_t *cx = malloc(sizeof(*cx));
+    if (!cx) { pg_tensor_free(v); return NULL; }
+    cx->alpha = alpha;
+    pg_node *r = attach(v, 1, &a, bwd_leaky, cx, PG_AG_OP_LEAKY_RELU);
+    if (!r) free(cx);
+    return r;
+}
 
 pg_node *pg_ag_matmul(pg_node *a, pg_node *b)
 {

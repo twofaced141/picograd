@@ -294,26 +294,28 @@ static void hip_register_gpu(void);
 static pg_status hip_init(void)
 {
     static pg_status cached = PG_ERR_UNSUPPORTED;
-    static int done = 0;
-    if (done) return cached;
-    done = 1;
+    static int init_ok = 0;
+    if (init_ok) return cached;
 
     int debug = getenv("PG_HIP_DEBUG") != NULL;
     pg_status err = PG_OK;
     const pg_hip_drv *drv = pg_hip_drv_get(&err);
     if (!drv) {
         if (debug) fprintf(stderr, "picograd/hip: driver get failed %d\n", err);
-        return cached = err;
+        cached = err;
+        return cached;
     }
 
     int count = 0;
     if (drv->getDeviceCount(&count) != 0 || count == 0) {
         if (debug) fprintf(stderr, "picograd/hip: no devices count=%d\n", count);
-        return cached = PG_ERR_UNSUPPORTED;
+        cached = PG_ERR_UNSUPPORTED;
+        return cached;
     }
     if (drv->setDevice(0) != 0) {
         if (debug) fprintf(stderr, "picograd/hip: hipSetDevice 0 failed\n");
-        return cached = PG_ERR_UNSUPPORTED;
+        cached = PG_ERR_UNSUPPORTED;
+        return cached;
     }
 
     /* Try to compile kernels via hiprtc */
@@ -322,7 +324,8 @@ static pg_status hip_init(void)
     pg_status st = hip_compile_and_load(src, &mod);
     if (st != PG_OK) {
         if (debug) fprintf(stderr, "picograd/hip: kernel JIT failed %d\n", st);
-        return cached = st;
+        cached = st;
+        return cached;
     }
 
     g_module = mod;
@@ -356,6 +359,7 @@ static pg_status hip_init(void)
     }
 
     cached = PG_OK;
+    init_ok = 1;
     return cached;
 }
 

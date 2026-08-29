@@ -205,7 +205,7 @@ static inline bool is_contiguous(const pg_tensor *t) {
 
 static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f)(float, float))
 {
-    assert(a && b && a->data && b->data);
+    if (!a || !b || !a->data || !b->data) return NULL;
 
     size_t ndim = a->ndim > b->ndim ? a->ndim : b->ndim;
     size_t shape[PG_MAX_NDIM];
@@ -441,7 +441,7 @@ static void map_par_fn(void *ctx, size_t s, size_t e){ map_par_t *p=ctx; float *
 
 static pg_tensor *map1(const pg_tensor *a, float (*f)(float))
 {
-    assert(a && a->data);
+    if (!a || !a->data) return NULL;
     pg_tensor *r = pg_tensor_clone(a);
     if (!r)
         return NULL;
@@ -515,7 +515,8 @@ static void clamp_par_fn(void *ctx, size_t s, size_t e){ clamp_par_t *p=ctx; flo
 
 pg_tensor *pg_clamp(const pg_tensor *a, float lo, float hi)
 {
-    assert(a && a->data);
+    if (!a || !a->data) return NULL;
+    if (lo > hi) return NULL;
     pg_tensor *r = pg_tensor_clone(a);
     if (!r)
         return NULL;

@@ -95,9 +95,9 @@ static float f_max(float a, float x) { return x > a ? x : a; }
 static float f_min(float a, float x) { return x < a ? x : a; }
 
 static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
-                              combine_fn f, float init)
+                               combine_fn f, float init)
 {
-    assert(t && t->data && t->ndim >= 1 && axis < t->ndim);
+    if (!t || !t->data || t->ndim < 1 || axis >= t->ndim) return NULL;
 
     size_t shape[PG_MAX_NDIM];
     out_shape_for(t, axis, keepdim, shape);
@@ -299,7 +299,7 @@ pg_tensor *pg_min(const pg_tensor *t, size_t axis, bool keepdim)
 
 pg_tensor *pg_mean(const pg_tensor *t, size_t axis, bool keepdim)
 {
-    assert(t && t->data && t->ndim >= 1 && axis < t->ndim);
+    if (!t || !t->data || t->ndim < 1 || axis >= t->ndim) return NULL;
     size_t len = t->shape[axis];
     float inv = 1.0f / (float)len;
     pg_tensor *g = try_sum_gpu(t, axis, keepdim, inv);
@@ -313,9 +313,10 @@ pg_tensor *pg_mean(const pg_tensor *t, size_t axis, bool keepdim)
 }
 
 static pg_tensor *reduce_moment(const pg_tensor *t, size_t axis, bool keepdim,
-                                int ddof, float (*post)(float))
+                                 int ddof, float (*post)(float))
 {
-    assert(ddof == 0 || ddof == 1);
+    if (!t || !t->data || axis >= t->ndim) return NULL;
+    if (ddof != 0 && ddof != 1) return NULL;
     size_t len = t->shape[axis];
     if ((size_t)ddof >= len)
         return NULL;
@@ -371,7 +372,7 @@ pg_tensor *pg_std(const pg_tensor *t, size_t axis, bool keepdim, int ddof)
 
 static pg_tensor *reduce_arg(const pg_tensor *t, size_t axis, bool keepdim, bool largest)
 {
-    assert(t && t->data && t->ndim >= 1 && axis < t->ndim);
+    if (!t || !t->data || t->ndim < 1 || axis >= t->ndim) return NULL;
 
     size_t shape[PG_MAX_NDIM];
     out_shape_for(t, axis, keepdim, shape);

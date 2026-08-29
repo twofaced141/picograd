@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* ---------- internal structures ---------- */
@@ -584,34 +586,47 @@ static bool emit_c_code(const pg_jit_graph *g, FILE *f){
 static bool file_exists(const char *p){
     struct stat st; return stat(p,&st)==0;
 }
+static int compile_with(const char *comp, const char *c_path, const char *so_path){
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        // child: exec compiler without shell
+        execlp(comp, comp, "-O3", "-ffast-math", "-fPIC", "-shared", "-o", so_path, c_path, "-lm", (char*)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status) && WEXITSTATUS(status)==0 && file_exists(so_path)) return 0;
+    return -1;
+}
 static int compile_c_to_so(const char *c_path, const char *so_path){
     const char *comps[]={"cc","gcc","clang", NULL};
-    char cmd[2048];
     for (int i=0; comps[i]; i++){
-        // check if compiler exists
-        char which[256];
-        snprintf(which,sizeof(which),"which %s > /dev/null 2>&1", comps[i]);
-        if (system(which)!=0) continue;
-        snprintf(cmd,sizeof(cmd),"%s -O3 -ffast-math -fPIC -shared -o %s %s -lm 2>&1",
-                 comps[i], so_path, c_path);
-        int rc = system(cmd);
-        if (rc==0 && file_exists(so_path)) return 0;
+        if (compile_with(comps[i], c_path, so_path)==0) return 0;
     }
-    // try plain cc anyway
-    snprintf(cmd,sizeof(cmd),"cc -O3 -ffast-math -fPIC -shared -o %s %s -lm 2>&1", so_path, c_path);
-    int rc = system(cmd);
-    if (rc==0 && file_exists(so_path)) return 0;
     return -1;
 }
 
 static void make_temp_paths(char *c_path, size_t csz, char *so_path, size_t ssz){
-    // use pid + counter + random
+    char tmpl[] = "/tmp/picograd_jit_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd >= 0) {
+        close(fd);
+        // tmpl is now a unique base, create .c/.so names from it
+        snprintf(c_path, csz, "%s.c", tmpl);
+        snprintf(so_path, ssz, "%s.so", tmpl);
+        unlink(tmpl);
+        // ensure no collision (extremely unlikely with mkstemp)
+        if (!file_exists(c_path) && !file_exists(so_path)) return;
+    }
+    // fallback to pid+counter+random if mkstemp failed or collision
     size_t cnt = __sync_fetch_and_add(&g_jit_counter, 1);
     pid_t pid = getpid();
     unsigned r = (unsigned)rand();
+    // mix in time to avoid rand() determinism
+    r ^= (unsigned)(uintptr_t)&cnt;
     snprintf(c_path,csz,"/tmp/picograd_jit_%d_%zu_%u.c", (int)pid, cnt, r);
     snprintf(so_path,ssz,"/tmp/picograd_jit_%d_%zu_%u.so", (int)pid, cnt, r);
-    // ensure not exists, if exists increment
     int tries=0;
     while((file_exists(c_path)||file_exists(so_path)) && tries<10){
         r++; cnt++;
