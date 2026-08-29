@@ -122,10 +122,6 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
             } else {
                 reduce_fold1_par_t ctx={t->data, out->data, outer, len, init, f};
                 pg_parallel_for(outer, 32, reduce_fold1_par_fn, &ctx);
-                // adjust for keepdim stride if needed (already contiguous for inner==1, but ensure)
-                if (keepdim && ostride != 1) {
-                    // Need to scatter results when ostride !=1? For last axis ostride==1, so not needed
-                }
             }
             return out;
         }
@@ -196,7 +192,7 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
             }
             return out;
         }
-        // fallback for other f
+        // unsupported combine function -> generic path below
     }
 
     for (size_t o = 0; o < outer; o++) {
@@ -260,8 +256,7 @@ static pg_tensor *try_sum_gpu(const pg_tensor *t, size_t axis, bool keepdim, flo
         pg_tensor_free(out);
         return NULL;
     }
-    /* zero device output before accumulation (kernel does out = sum*scale) */
-    /* but kernel writes directly, no need to pre-zero */
+    /* kernel writes out = sum*scale directly; no need to pre-zero */
 
     pg_status st = pg_op_sum_axis(dc, da, scale, outer, len, inner, ostride);
     if (st != PG_OK) {

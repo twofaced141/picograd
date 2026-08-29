@@ -20,7 +20,6 @@ static void *g_fn_sgemm;
 static void *g_ops_module;
 static void *g_fn_map;
 static void *g_fn_bin;
-static void *g_fn_accum_gather;
 static void *g_fn_accum_scatter;
 static void *g_fn_sum_axis;
 static void *g_fn_softmax;
@@ -71,7 +70,6 @@ static pg_status cuda_init(void)
     rc = drv->module_load_data(&g_ops_module, ops_ptx);
     if (rc != 0) {
         if (debug) fprintf(stderr, "picograd/cuda: cuModuleLoadData ops -> %d (continuing with sgemm only)\n", rc);
-        // sgemm is enough for bench; ops will fallback to CPU
         cached = PG_OK;
         if (debug) fprintf(stderr, "picograd/cuda: init ok (sgemm only)\n");
         return cached;
@@ -81,8 +79,6 @@ static pg_status cuda_init(void)
     if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_map -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_bin, g_ops_module, "pg_k_bin");
     if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_bin -> %d\n", rc); ops_ok = 0; }
-    rc = drv->module_get_function(&g_fn_accum_gather, g_ops_module, "pg_k_accum_gather");
-    if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_gather -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_accum_scatter, g_ops_module, "pg_k_accum_scatter");
     if (rc != 0) { if (debug) fprintf(stderr, "picograd/cuda: get pg_k_accum_scatter -> %d\n", rc); ops_ok = 0; }
     rc = drv->module_get_function(&g_fn_sum_axis, g_ops_module, "pg_k_sum_axis");
@@ -199,20 +195,6 @@ static pg_status cuda_gpu_bin(float *out, const float *a, const float *b,
     return rc == 0 ? PG_OK : PG_ERR_GEMM;
 }
 
-static pg_status cuda_gpu_accum_gather(float *dst, const float *src,
-                                        float scale, const pg_k_strides *args)
-{
-    if (cuda_init() != PG_OK)
-        return PG_ERR_GEMM;
-    uint32_t scale_bits;
-    memcpy(&scale_bits, &scale, sizeof scale_bits);
-    void *params[] = { &dst, &src, &scale_bits, (void *)args };
-    unsigned gx = ((unsigned)args->numel + PG_CUDA_THREADS - 1) / PG_CUDA_THREADS;
-    int rc = pg_cuda_drv_get(NULL)->launch_kernel(
-        g_fn_accum_gather, gx, 1, 1, PG_CUDA_THREADS, 1, 1, 0, NULL, params, NULL);
-    return rc == 0 ? PG_OK : PG_ERR_GEMM;
-}
-
 static pg_status cuda_gpu_accum_scatter(float *dst, const float *src,
                                          float scale, const pg_k_strides *args)
 {
@@ -285,7 +267,6 @@ static void cuda_register_gpu(void)
 {
     pg_gpu.map          = cuda_gpu_map;
     pg_gpu.bin          = cuda_gpu_bin;
-    pg_gpu.accum_gather  = cuda_gpu_accum_gather;
     pg_gpu.accum_scatter = cuda_gpu_accum_scatter;
     pg_gpu.sum_axis     = cuda_gpu_sum_axis;
     pg_gpu.softmax      = cuda_gpu_softmax;

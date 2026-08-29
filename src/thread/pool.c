@@ -154,8 +154,6 @@ void pg_thread_pool_fini(void) {
     pthread_cond_destroy(&p->cv);
     pthread_cond_destroy(&p->done_cv);
     g_init_done = 0;
-    // reset once for possible re-init
-    // pthread_once_t cannot be reset portably, but we don't need re-init after fini in normal use
 }
 
 int pg_thread_pool_size(void) {

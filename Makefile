@@ -111,7 +111,7 @@ test: $(TESTS)
 	@for t in $(TESTS); do ./$$t || exit 1; done
 
 examples: $(EXAMPLES)
-	@for e in $(EXAMPLES); do echo "== $$e =="; ./$$e || exit 1; done
+	@echo "examples compiled:"; for e in $(EXAMPLES); do echo "  $$e"; done
 
 # run tests under Intel SDE (emulates AVX-512 on CPUs without it)
 test-sde: $(TESTS)

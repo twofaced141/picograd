@@ -7,12 +7,13 @@ A tiny tensor library in C11 with reverse-mode autograd and SGD, running on the 
 - Tensors up to 8 dimensions, row-major, `float32`
 - Ops: elementwise (broadcasting), matmul/bmm/tensordot, reductions, activations,
   indexing/gather/scatter, cumsum/sort/topk
-- Reverse-mode autograd over a dynamically built computation graph
+- Reverse-mode autograd over a dynamically built computation graph, **JIT-accelerated for elementwise chains** (fused backward, fallback to eager for matmul/reduce)
 - Optimizer: SGD with momentum, dampening, weight decay and Nesterov variant
 - Hand-written AVX2 / AVX-512 GEMM microkernels
 - **JIT compilation** — tracing + fusion of elementwise chains into a single
   `cc -O3 -fPIC -shared` kernel (`dlopen` at runtime), with broadcast support
-  and cross-run cache (`src/jit`)
+  and cross-run cache (`src/jit`); **covers both forward and backward (autograd)** —
+  elementwise backward chains are fused into one kernel (e.g., `sub->mul->tanh` backward in one pass)
 
 ## Build
 
@@ -103,13 +104,14 @@ pg_jit_cache_clear();
 Benchmark for fused `[64,64]` `(a+b)*c -> relu -> tanh` (10000 iterations):
 
 ```
-eager: ~900 ms (4 passes)
-jit  : ~140 ms (1 pass)  ~6.5x
+forward  eager: ~900 ms (4 passes)  jit: ~140 ms (1 pass)  ~6.5x
+backward eager: ~540 ms (4 passes)  jit: ~1140 ms (1 pass, small) -> 0.5x (overhead dominates)
+         large [512,512] eager: ~9700 ms  jit: ~5000 ms  ~1.9x (compute dominates)
 ```
 
-See `examples/jit_demo.c` and `examples/train_xor_jit.c`, tests `tests/test_jit.c`.
+See `examples/jit_demo.c` and `examples/train_xor_jit.c`, tests `tests/test_jit.c` and `tests/test_jit_autograd` (implicit via `test_autograd`).
 
-MVP limitations: elementwise fusion only, single loop shape (all outputs share `same numel`), `matmul/reduce` remain separate kernels; JIT is an inference/forward optimization, backward is still eager.
+MVP limitations: elementwise fusion only, single loop shape for pure elementwise graphs (all intermediate shapes equal, broadcast inputs allowed), `matmul/reduce` remain separate kernels; **JIT now covers both forward and backward** for elementwise chains (fused forward + fused backward), with suffix-fusion for mixed graphs (e.g., `mse` loss tail `sub->mul->mean` fused, `add(bias)` fused) and automatic fallback to eager for other ops. Pure elementwise graphs run fully JIT; mixed graphs (e.g., XOR MLP) run hybrid (JIT for elementwise suffix, eager for matmul). Enable/disable via `pg_autograd_set_jit(bool)` (`pg_autograd_is_jit_enabled()`, `pg_autograd_last_was_jit()`, `pg_autograd_jit_hits()`).
 
 ## Layout
 

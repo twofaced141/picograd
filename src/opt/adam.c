@@ -10,6 +10,8 @@ typedef struct {
     pg_tensor *m;
     pg_tensor *v;
     pg_tensor *vmax; // for amsgrad
+    float lr;        // per-param override (0 = use cfg)
+    float wd;        // per-param override (<0 = use cfg)
 } adam_state_t;
 
 struct pg_adam {
@@ -63,6 +65,10 @@ void pg_adam_free(pg_adam *opt){
 }
 
 int pg_adam_add_param(pg_adam *opt, pg_node *param){
+    return pg_adam_add_param_lr(opt, param, 0.0f, -1.0f);
+}
+
+int pg_adam_add_param_lr(pg_adam *opt, pg_node *param, float lr, float wd){
     assert(opt && param && param->requires_grad);
     if(opt->nparams==opt->cap){
         size_t ncap=opt->cap?opt->cap*2:8;
@@ -76,11 +82,22 @@ int pg_adam_add_param(pg_adam *opt, pg_node *param){
     opt->states[opt->nparams].m=NULL;
     opt->states[opt->nparams].v=NULL;
     opt->states[opt->nparams].vmax=NULL;
+    opt->states[opt->nparams].lr=lr;
+    opt->states[opt->nparams].wd=wd;
     opt->nparams++;
     return 0;
 }
 
 size_t pg_adam_num_params(const pg_adam *opt){ return opt?opt->nparams:0; }
+
+void pg_adam_set_lr(pg_adam *opt, float lr){ if(opt) opt->cfg.lr=lr; }
+float pg_adam_get_lr(const pg_adam *opt){ return opt?opt->cfg.lr:0.0f; }
+void pg_adam_set_param_lr(pg_adam *opt, size_t idx, float lr){
+    assert(opt && idx<opt->nparams); opt->states[idx].lr=lr;
+}
+void pg_adam_set_param_wd(pg_adam *opt, size_t idx, float wd){
+    assert(opt && idx<opt->nparams); opt->states[idx].wd=wd;
+}
 
 void pg_adam_zero_grad(pg_adam *opt){
     assert(opt);
@@ -95,11 +112,9 @@ unsigned long long pg_adam_get_step(const pg_adam *opt){ return opt?opt->step:0;
 
 void pg_adam_step(pg_adam *opt){
     assert(opt);
-    float lr=opt->cfg.lr;
     float b1=opt->cfg.beta1;
     float b2=opt->cfg.beta2;
     float eps=opt->cfg.eps;
-    float wd=opt->cfg.weight_decay;
     bool amsgrad=opt->cfg.amsgrad;
     bool decoupled=opt->cfg.decoupled_wd;
     opt->step++;
@@ -117,6 +132,10 @@ void pg_adam_step(pg_adam *opt){
         float *pv=p->value->data;
         float *gv=g->data;
         size_t n=p->value->numel;
+
+        // per-param lr / wd override (0 / <0 => use cfg)
+        float lr = opt->states[i].lr > 0.0f ? opt->states[i].lr : opt->cfg.lr;
+        float wd = opt->states[i].wd >= 0.0f ? opt->states[i].wd : opt->cfg.weight_decay;
 
         // lazy init m/v
         if(!opt->states[i].m){

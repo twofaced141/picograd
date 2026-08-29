@@ -11,7 +11,8 @@
 extern "C" {
 #endif
 
-/* Ops that can be fused. Binary ops support broadcasting, unary are elementwise. */
+/* Ops that can be fused. Binary ops support broadcasting, unary are elementwise.
+   STEP is x>0?1:0 for relu grad. */
 typedef enum {
     PG_JIT_ADD = 0,
     PG_JIT_SUB,
@@ -29,6 +30,7 @@ typedef enum {
     PG_JIT_TANH,
     PG_JIT_GELU,
     PG_JIT_ERF,
+    PG_JIT_STEP, /* x > 0 ? 1 : 0  (relu grad) */
 } pg_jit_op_t;
 
 typedef struct pg_jit_graph pg_jit_graph;
@@ -59,6 +61,7 @@ int pg_jit_sigmoid(pg_jit_graph *g, int a);
 int pg_jit_tanh(pg_jit_graph *g, int a);
 int pg_jit_gelu(pg_jit_graph *g, int a);
 int pg_jit_erf(pg_jit_graph *g, int a);
+int pg_jit_step(pg_jit_graph *g, int a); /* x > 0 ? 1 : 0 */
 
 int pg_jit_add_op(pg_jit_graph *g, pg_jit_op_t op, const int *inputs, size_t ninputs);
 

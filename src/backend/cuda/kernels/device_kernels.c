@@ -247,30 +247,6 @@ void pg_k_bin(float *out, const float *a, const float *b, u32 op,
     }
 }
 
-/* dst (larger domain) += scale * src gathered via s[] strides */
-/* ar.shape/numel describe DST; ar.s are SRC strides per dst dim */
-void pg_k_accum_gather(float *dst, const float *src, float scale,
-                       pg_k_strides ar)
-{
-    const u32 stride = ntid_x() * nctaid_x();
-
-    for (u32 i = tid_x() + ctaid_x() * ntid_x(); i < ar.numel;
-         i += stride) {
-        u32 idx[PG_MAX_OP_NDIM];
-        u32 rem = i;
-        for (u32 d = ar.ndim; d-- > 0;) {
-            idx[d] = rem % ar.shape[d];
-            rem /= ar.shape[d];
-        }
-
-        u32 os = 0;
-        for (u32 d = 0; d < ar.ndim; d++)
-            os += idx[d] * ar.s[d];
-
-        dst[i] += scale * src[os];
-    }
-}
-
 /* dst (projected via s[]) += scale * src iterating src's own domain */
 /* ar.shape/numel describe SRC; ar.s are DST strides per src dim */
 void pg_k_accum_scatter(float *dst, const float *src, float scale,

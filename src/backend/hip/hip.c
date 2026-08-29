@@ -20,7 +20,6 @@ static void *g_module = NULL;
 static void *g_fn_sgemm = NULL;
 static void *g_fn_map = NULL;
 static void *g_fn_bin = NULL;
-static void *g_fn_accum_gather = NULL;
 static void *g_fn_accum_scatter = NULL;
 static void *g_fn_sum_axis = NULL;
 static void *g_fn_softmax = NULL;
@@ -103,17 +102,7 @@ static const char *hip_kernel_source(void)
     "        unsigned int ind[8]; unsigned int rem=i;\n"
     "        for(unsigned int d=ar.ndim; d-- >0;){ ind[d]=rem % ar.shape[d]; rem/=ar.shape[d]; }\n"
     "        unsigned int oa=0,ob=0; for(unsigned int d=0;d<ar.ndim;d++){ oa+=ind[d]*ar.sa[d]; ob+=ind[d]*ar.sb[d]; }\n"
-    "        out[i]=bin_apply((int)op,a[oa],b[ob]);\n"
-    "    }\n"
-    "}\n"
-    "extern \"C\" __global__ void pg_k_accum_gather(float* dst, const float* src, float scale, struct PgStrides ar){\n"
-    "    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;\n"
-    "    unsigned int stride = blockDim.x * gridDim.x;\n"
-    "    for(unsigned int i=idx;i<ar.numel;i+=stride){\n"
-    "        unsigned int ind[8]; unsigned int rem=i;\n"
-    "        for(unsigned int d=ar.ndim; d-- >0;){ ind[d]=rem % ar.shape[d]; rem/=ar.shape[d]; }\n"
-    "        unsigned int os=0; for(unsigned int d=0;d<ar.ndim;d++) os+=ind[d]*ar.s[d];\n"
-    "        dst[i] += scale * src[os];\n"
+    "    out[i]=bin_apply((int)op,a[oa],b[ob]);\n"
     "    }\n"
     "}\n"
     "extern \"C\" __global__ void pg_k_accum_scatter(float* dst, const float* src, float scale, struct PgStrides ar){\n"
@@ -346,8 +335,6 @@ static pg_status hip_init(void)
     if (rc != 0) { if (debug) fprintf(stderr, "picograd/hip: get pg_k_map -> %d\n", rc); ok = 0; }
     rc = drv->moduleGetFunction(&g_fn_bin, g_module, "pg_k_bin");
     if (rc != 0) { if (debug) fprintf(stderr, "picograd/hip: get pg_k_bin -> %d\n", rc); ok = 0; }
-    rc = drv->moduleGetFunction(&g_fn_accum_gather, g_module, "pg_k_accum_gather");
-    if (rc != 0) { if (debug) fprintf(stderr, "picograd/hip: get pg_k_accum_gather -> %d\n", rc); ok = 0; }
     rc = drv->moduleGetFunction(&g_fn_accum_scatter, g_module, "pg_k_accum_scatter");
     if (rc != 0) { if (debug) fprintf(stderr, "picograd/hip: get pg_k_accum_scatter -> %d\n", rc); ok = 0; }
     rc = drv->moduleGetFunction(&g_fn_sum_axis, g_module, "pg_k_sum_axis");
@@ -425,8 +412,7 @@ static void hip_gemm(size_t m, size_t n, size_t k,
     assert(lda == k && ldb == n && ldc == n);
     assert(m <= 0xffffffffu && n <= 0xffffffffu && k <= 0xffffffffu);
     if (hip_init() != PG_OK || !g_fn_sgemm) {
-        /* fallback should not be reached because backend.c already handles NULL gemm,
-           but this is called only if hip backend is active; fallback to CPU impl via assert */
+        /* unreachable: caller ensures HIP backend is active */
         assert(!"hip backend gemm not available");
         return;
     }
@@ -466,18 +452,6 @@ static pg_status hip_gpu_bin(float *out, const float *a, const float *b,
     void *params[] = { &out, &a, &b, &op32, &kargs };
     unsigned gx = ((unsigned)n + PG_HIP_THREADS - 1) / PG_HIP_THREADS;
     int rc = drv->moduleLaunchKernel(g_fn_bin, gx, 1, 1, PG_HIP_THREADS, 1, 1, 0, NULL, params, NULL);
-    return rc == 0 ? PG_OK : PG_ERR_GEMM;
-}
-
-static pg_status hip_gpu_accum_gather(float *dst, const float *src, float scale, const pg_k_strides *args)
-{
-    if (hip_init() != PG_OK || !g_fn_accum_gather) return PG_ERR_GEMM;
-    const pg_hip_drv *drv = pg_hip_drv_get(NULL);
-    if (!drv) return PG_ERR_GEMM;
-    pg_k_strides kargs = *args;
-    void *params[] = { &dst, &src, &scale, &kargs };
-    unsigned gx = ((unsigned)args->numel + PG_HIP_THREADS - 1) / PG_HIP_THREADS;
-    int rc = drv->moduleLaunchKernel(g_fn_accum_gather, gx, 1, 1, PG_HIP_THREADS, 1, 1, 0, NULL, params, NULL);
     return rc == 0 ? PG_OK : PG_ERR_GEMM;
 }
 
@@ -552,11 +526,9 @@ static pg_status hip_gpu_fill(void *p, size_t nbytes, float v)
         /* fall through to memcpy path on launch failure */
     }
 
-    /* Fallback: host staging + H2D-like copy via device-to-device memcpy path.
-       We can use hipMemset if v==0, else do host fill + memcpy D2D via H2D staging. */
+    /* fallback for byte-repeated values via memset, otherwise host fill */
     uint32_t bits;
     memcpy(&bits, &v, sizeof bits);
-    /* Check if fill is byte-repeated (e.g., 0.0f) - then hipMemset works */
     uint8_t b0 = bits & 0xff;
     uint32_t rep = b0 | (b0<<8) | (b0<<16) | (b0<<24);
     if (rep == bits) {
@@ -565,10 +537,7 @@ static pg_status hip_gpu_fill(void *p, size_t nbytes, float v)
             return PG_OK;
         }
     }
-    /* Generic fallback: allocate host buffer, fill, and copy H2D onto device pointer
-       using hipMemcpy which can handle D as dst with H2D kind if driver interprets.
-       For strictness, we allocate a temporary host buffer and use hipMemcpy H2D onto p.
-       hipMemcpy with dst=device already supports H2D. */
+    /* host fill + H2D copy */
     float *tmp = (float*)malloc(nbytes);
     if (!tmp) return PG_ERR_ALLOC;
     size_t n = nbytes / sizeof(float);
@@ -590,7 +559,6 @@ static void hip_register_gpu(void)
 {
     pg_gpu.map           = hip_gpu_map;
     pg_gpu.bin           = hip_gpu_bin;
-    pg_gpu.accum_gather  = hip_gpu_accum_gather;
     pg_gpu.accum_scatter = hip_gpu_accum_scatter;
     pg_gpu.sum_axis      = hip_gpu_sum_axis;
     pg_gpu.softmax       = hip_gpu_softmax;

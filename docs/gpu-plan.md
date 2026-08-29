@@ -70,7 +70,7 @@ available — its kernels come almost for free on top of the CUDA path
     float4 vectorized loads, double buffering, 8×8 micro-tiles —
     expect up to 4–6 TFLOPS combined. Deferred until after M3 per plan.
   - [x] `src/backend/cuda/kernels/device_kernels.c` + `ops.ptx` + `pg_gpu_kernels` vtable
-    with 8 ops (map/bin/accum_gather/scatter/sum_axis/softmax/copy_strided/fill/copy_d2d)
+    with 7 ops (map/bin/accum_scatter/sum_axis/softmax/copy_strided/fill/copy_d2d)
     and `src/backend/cuda/cuda.c` wrappers (26 Aug 2026)
 
 - [x] **M2 — Metal minimum** (tested on M4, stub on Linux)
@@ -91,7 +91,7 @@ available — its kernels come almost for free on top of the CUDA path
   - device kernels: `src/backend/cuda/kernels/device_kernels.c` compiled to `ops.ptx` / `ops_ptx.h`
     implements `pg_k_map` (EXP/LOG/SIN/COS/SQRT/NEG/ABS/ERF/RELU/SIGMOID/TANH),
     `pg_k_bin` (ADD/SUB/MUL/DIV/SIG_BW/TANH_BW/RELU_BW with broadcast strides),
-    `pg_k_accum_gather/scatter` (broadcast grad accumulation), `pg_k_sum_axis`,
+    `pg_k_accum_scatter` (broadcast grad accumulation), `pg_k_sum_axis`,
     `pg_k_softmax`, `pg_k_copy_strided`; CUDA wrappers in `src/backend/cuda/cuda.c`
     and Metal stubs in `src/backend/metal/metal.c` expose them via `pg_gpu` vtable.
   - ops dispatch (CPU fallback preserved):
@@ -113,7 +113,7 @@ available — its kernels come almost for free on top of the CUDA path
 - [x] **M4 — HIP/ROCm** (27 Aug 2026, tested fallback on CPU-only host, needs AMD HW for full validation)
   Done:
   - driver loader: `src/backend/hip/driver.{h,c}` — dlopens `libamdhip64.so` (`/opt/rocm/lib/libamdhip64.so`) and `libhiprtc.so`, binds hip* + hiprtc* symbols, checks device count;
-  - backend: `src/backend/hip/hip.c` — `pg_backend_hip` table (init/malloc/copy/sync/gemm), hiprtc JIT at runtime for all kernels (same math as CUDA `device_kernels.c`), `pg_gpu` vtable (map/bin/accum_gather/scatter/sum_axis/softmax/copy_strided/fill/copy_d2d);
+  - backend: `src/backend/hip/hip.c` — `pg_backend_hip` table (init/malloc/copy/sync/gemm), hiprtc JIT at runtime for all kernels (same math as CUDA `device_kernels.c`), `pg_gpu` vtable (map/bin/accum_scatter/sum_axis/softmax/copy_strided/fill/copy_d2d);
   - kernels: single HIP source (`hip_kernel_source()`) compiled via hiprtc with `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel`; fallback to `PG_ERR_GEMM` if JIT fails (graceful CPU fallback); `Makefile` `BACKEND=hip` (`rocm` alias) adds `-DPICOGRAD_BACKEND_HIP -ldl` and builds `src/backend/hip/*.c`;
   - CPU fallback preserved: `make BACKEND=hip` on a machine without ROCm returns `PG_ERR_UNSUPPORTED` from `pg_set_device(PG_DEV_HIP)` and all ops/tests/examples fall back to CPU (verified: `make BACKEND=hip test && ./build/train_xor` 4/4);
   - benchmark `benchmarks/bench_gemm_hip.c` + `make BACKEND=hip bench-gpu`.

@@ -143,14 +143,6 @@ pg_status pg_op_bin(float *out, const float *a, const float *b, size_t n,
     return pg_gpu.bin(out, a, b, n, op, args);
 }
 
-pg_status pg_op_accum_gather(float *dst, const float *src, float scale,
-                             const pg_k_strides *args)
-{
-    if (g_device == PG_DEV_CPU || !pg_gpu.accum_gather)
-        return PG_ERR_UNSUPPORTED;
-    return pg_gpu.accum_gather(dst, src, scale, args);
-}
-
 pg_status pg_op_accum_scatter(float *dst, const float *src, float scale,
                               const pg_k_strides *args)
 {
@@ -216,23 +208,4 @@ void pg_dev_buf_free(pg_dev_buf *buf)
         buf->ptr = NULL;
     }
     buf->nbytes = 0;
-}
-
-/* GPU exec helper */
-pg_dev_exec pg_dev_exec_begin(pg_tensor *result)
-{
-    pg_dev_exec exec = {true, result};
-    return exec;
-}
-
-bool pg_dev_exec_check(pg_dev_exec *exec, bool condition)
-{
-    if (!condition)
-        exec->ok = false;
-    return exec->ok;
-}
-
-void pg_dev_exec_end(pg_dev_exec *exec)
-{
-    (void)exec;
 }

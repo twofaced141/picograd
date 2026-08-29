@@ -63,7 +63,7 @@ typedef struct cache_entry {
     size_t out_ndim[16];
     size_t out_shape[16][PG_MAX_NDIM];
     size_t out_numel[16];
-    /* keep copy of graph for equality check (optional) */
+    /* keep copy of graph for equality check */
     pg_jit_graph *graph_copy;
     struct cache_entry *next;
 } cache_entry_t;
@@ -255,6 +255,7 @@ int pg_jit_sigmoid(pg_jit_graph *g, int a){ return pg_jit_add_op(g, PG_JIT_SIGMO
 int pg_jit_tanh(pg_jit_graph *g, int a){ return pg_jit_add_op(g, PG_JIT_TANH, &a, 1); }
 int pg_jit_gelu(pg_jit_graph *g, int a){ return pg_jit_add_op(g, PG_JIT_GELU, &a, 1); }
 int pg_jit_erf(pg_jit_graph *g, int a){ return pg_jit_add_op(g, PG_JIT_ERF, &a, 1); }
+int pg_jit_step(pg_jit_graph *g, int a){ return pg_jit_add_op(g, PG_JIT_STEP, &a, 1); }
 
 void pg_jit_mark_output(pg_jit_graph *g, int id){
     if (!g || id<0 || (size_t)id>=g->nnodes) { set_err("invalid output id"); return; }
@@ -332,6 +333,7 @@ static const char *op_to_expr(pg_jit_op_t op, const char *a, const char *b, char
         case PG_JIT_TANH: snprintf(buf,blen,"tanhf(%s)",a); break;
         case PG_JIT_GELU: snprintf(buf,blen,"(0.5f * (%s) * (1.0f + erff((%s) * 0.70710678118f)))",a,a); break;
         case PG_JIT_ERF: snprintf(buf,blen,"erff(%s)",a); break;
+        case PG_JIT_STEP: snprintf(buf,blen,"((%s) > 0.0f ? 1.0f : 0.0f)",a); break;
         default: snprintf(buf,blen,"0.0f"); break;
     }
     return buf;
@@ -385,8 +387,7 @@ static void mark_reachable(const pg_jit_graph *g, bool *reach){
 /* emit C code */
 static bool emit_c_code(const pg_jit_graph *g, FILE *f){
     if (!g || g->noutputs==0) { set_err("no outputs"); return false; }
-    // validate single loop shape: all outputs share same numel/shape? For now require same numel else error.
-    // We'll support multiple outputs only if they share same shape (common fused case)
+    // all outputs must share the same shape
     size_t out0_id = g->outputs[0];
     const jnode_t *out0 = &g->nodes[out0_id];
     size_t out_ndim = out0->ndim;
@@ -396,8 +397,6 @@ static bool emit_c_code(const pg_jit_graph *g, FILE *f){
         const jnode_t *o=&g->nodes[g->outputs[i]];
         if (o->numel!=out_numel) { set_err("multi-output with different numel not supported (%zu vs %zu)",o->numel,out_numel); return false; }
         if (!shape_equal(o->ndim,o->shape,out_ndim,out_shape)){
-            // allow same numel but different shape? Still need same loop shape. For simplicity require same shape.
-            // But numel same, shape different could still be same total elements but loop shape differs. Not support.
             set_err("multi-output with different shape not supported"); return false;
         }
     }
@@ -494,10 +493,9 @@ static bool emit_c_code(const pg_jit_graph *g, FILE *f){
                 assert(pos>=0);
                 fprintf(f, "float v%zu = in%zu[off_in%zu];\n", nid, (size_t)pos, (size_t)pos);
             }else if (n->kind==JNODE_CONST){
-                fprintf(f, "float v%zu = %.9gF;\n", nid, (double)n->const_val);
+                fprintf(f, "float v%zu = (float)%.9g;\n", nid, (double)n->const_val);
             }else if (n->kind==JNODE_OP){
                 char expr[512];
-                char buf[512];
                 if (op_is_binary(n->op)){
                     int a=n->inputs[0], b=n->inputs[1];
                     char sa[32], sb[32];
@@ -510,7 +508,6 @@ static bool emit_c_code(const pg_jit_graph *g, FILE *f){
                     char sa[32];
                     snprintf(sa,sizeof(sa),"v%d",a);
                     op_to_expr(n->op, sa, sa, expr, sizeof(expr));
-                    (void)buf;
                     fprintf(f, "float v%zu = %s;\n", nid, expr);
                 }
             }
@@ -541,10 +538,9 @@ static bool emit_c_code(const pg_jit_graph *g, FILE *f){
                 assert(pos>=0);
                 fprintf(f, "    float v%zu = in%zu[off_in%zu];\n", nid, (size_t)pos, (size_t)pos);
             }else if (n->kind==JNODE_CONST){
-                fprintf(f, "    float v%zu = %.9gF;\n", nid, (double)n->const_val);
+                fprintf(f, "    float v%zu = (float)%.9g;\n", nid, (double)n->const_val);
             }else if (n->kind==JNODE_OP){
                 char expr[512];
-                char buf[512];
                 if (op_is_binary(n->op)){
                     int a=n->inputs[0], b=n->inputs[1];
                     char sa[32], sb[32];
@@ -557,7 +553,6 @@ static bool emit_c_code(const pg_jit_graph *g, FILE *f){
                     char sa[32];
                     snprintf(sa,sizeof(sa),"v%d",a);
                     op_to_expr(n->op, sa, sa, expr, sizeof(expr));
-                    (void)buf;
                     fprintf(f, "    float v%zu = %s;\n", nid, expr);
                 }
             }
@@ -671,9 +666,6 @@ pg_jit_exe *pg_jit_compile(pg_jit_graph *g){
     // compile
     if (compile_c_to_so(c_path, so_path)!=0){
         set_err("compile failed for %s (see %s)", so_path, c_path);
-        // keep c_path for debug, but unlink so if exists
-        // try to capture compiler error: we already used system with redirect, but not captured.
-        // For debugging, leave c file.
         return NULL;
     }
 

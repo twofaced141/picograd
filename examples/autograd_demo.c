@@ -14,7 +14,7 @@ static void print_grad(const char *name, pg_node *n){
 
 int main(void){
     printf("=== autograd basics ===\n");
-    printf("Demos: scalar chain, broadcasting grad, softmax, layernorm, numeric grad check.\n");
+    printf("demos: scalar chain, broadcasting grad, softmax, layernorm, numeric grad check.\n");
 
     // 1. scalar chain: y = (w*x + c)^2
     printf("\n--- 1. scalar chain: w=2, x=3, c=5, y=w*x+c, loss=y^2 ---\n");
@@ -43,8 +43,7 @@ int main(void){
     }
 
     // 2. broadcasting grad: [2,3] + [3] -> mean
-    // NOTE: pg_ag_mean_all has a scaling quirk for >1D (returns sum/last_dim, not sum/numel)
-    // so we build the true mean as mean(mean(c,0),0)
+    // Use two axis-wise means to compute the true mean over all elements.
     printf("\n--- 2. broadcasting grad: a[2,3] + b[3] -> mean ---\n");
     {
         float a_raw[6]={1,2,3,4,5,6};
@@ -80,10 +79,8 @@ int main(void){
         pg_node *loss = pg_ag_mean_all(s);
         printf("loss (mean softmax) = %g (expected 0.25)\n", pg_node_value(loss)->data[0]);
         pg_backward(loss);
-        // softmax mean: grad should sum to 0? Since mean of softmax = (1/N) sum softmax
-        // dL/dx = softmax * (1/N - softmax_mean?) Not exactly. But we can just print.
         print_grad("x", x);
-        // Check that grads sum approx 0 because softmax is normalized.
+        // softmax outputs sum to 1, so gradients of the mean sum to 0
         float sum=0; for(size_t i=0;i<x->grad->numel;i++) sum+= x->grad->data[i];
         printf("sum grad %.6f (should be ~0 for softmax+mean): %s\n", sum, fabsf(sum)<1e-5? "PASS":"CHECK");
         pg_node_free(loss); pg_node_free(s); pg_node_free(x);
@@ -110,7 +107,6 @@ int main(void){
         print_grad("w", w);
         print_grad("b", b);
         pg_node_free(loss);
-        // reset grads for rmsnorm: need new nodes or zero? We'll just create fresh.
         pg_node_free(x); pg_node_free(w); pg_node_free(b);
 
         x = pg_var_uniform(2,(size_t[]){2,4}, -1,1,true);
@@ -124,7 +120,6 @@ int main(void){
         print_grad("x", x);
         print_grad("w", w);
         pg_node_free(loss2); pg_node_free(x); pg_node_free(w);
-        // b was already freed
     }
 
     // 5. numeric grad check vs analytic

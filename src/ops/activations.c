@@ -94,7 +94,6 @@ static pg_tensor *try_map_gpu_act(const pg_tensor *a, int op)
     return out;
 }
 
-static float frelu(float x) { return x > 0.0f ? x : 0.0f; }
 static float fsigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 static float fgelu(float x) { return 0.5f * x * (1.0f + erff(x * 0.70710678118f)); }
 
@@ -215,21 +214,11 @@ static pg_tensor *softmax_impl(const pg_tensor *t, size_t axis, bool log)
         return r;
     }
 
-    // General case: blocked to keep inner contiguous
-    // For each outer, we process len x inner tile with inner contiguous loops
-    // Use temporary buffers for max/sum per inner if needed for vectorization
-    // But we can still do per-inner with strided access if inner is moderate; blocked version below reuses inner loop
-    // For large inner (e.g., axis=0 with 1024x1024), we want to avoid p+=inner strided per j.
-    // Instead, compute max per inner via outer loops: for v in len: for ii in inner: max[ii] = max(max[ii], src[(o*len+v)*inner+ii])
-    // So we need per-inner max/sum arrays.
+    // General case: per outer, process len x inner tile with contiguous inner loops
     for (size_t o = 0; o < outer; o++) {
         const float *base_src = src + o * len * inner;
         float *base_dst = dst + o * len * inner;
-        // Allocate temporary on stack for inner up to 4096, else heap
-        // For inner large (1024), this is fine
-        // Compute max per inner position
-        // Initialize with first row
-        // Use variable length array if inner small, else malloc
+        // per-inner max/sum: stack buffer up to 1024, else heap
         float *max_buf = NULL;
         float *sum_buf = NULL;
         float max_stack[1024];
@@ -243,14 +232,12 @@ static pg_tensor *softmax_impl(const pg_tensor *t, size_t axis, bool log)
             max_buf = max_stack;
             sum_buf = sum_stack;
         }
-        // init max with first row
         for (size_t ii = 0; ii < inner; ii++) max_buf[ii] = base_src[ii];
         for (size_t v = 1; v < len; v++) {
             const float *row = base_src + v * inner;
             #pragma GCC ivdep
             for (size_t ii = 0; ii < inner; ii++) if (row[ii] > max_buf[ii]) max_buf[ii] = row[ii];
         }
-        // compute sum of exp
         for (size_t ii = 0; ii < inner; ii++) sum_buf[ii] = 0.0f;
         for (size_t v = 0; v < len; v++) {
             const float *row = base_src + v * inner;
@@ -277,7 +264,7 @@ static pg_tensor *softmax_impl(const pg_tensor *t, size_t axis, bool log)
         if (use_heap) { free(max_buf); free(sum_buf); }
         continue;
 fallback:
-        // fallback strided per inner (original)
+        // fallback: per-inner strided (slower path used when heap alloc fails)
         for (size_t i = 0; i < inner; i++) {
             const float *scol = base_src + i;
             float *dcol = base_dst + i;

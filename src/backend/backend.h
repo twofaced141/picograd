@@ -87,8 +87,6 @@ pg_status pg_op_copy_d2d(void *dst, const void *src, size_t nbytes);
 pg_status pg_op_map(float *out, const float *src, size_t n, int op);
 pg_status pg_op_bin(float *out, const float *a, const float *b,
                     size_t n, int op, const pg_k_bin_args *args);
-pg_status pg_op_accum_gather(float *dst, const float *src, float scale,
-                             const pg_k_strides *args);
 pg_status pg_op_accum_scatter(float *dst, const float *src, float scale,
                               const pg_k_strides *args);
 pg_status pg_op_sum_axis(float *out, const float *src, float scale,
@@ -114,35 +112,6 @@ typedef struct {
 
 pg_dev_buf pg_dev_buf_new(size_t nbytes);
 void pg_dev_buf_free(pg_dev_buf *buf);
-
-/* Execute GPU operation with automatic cleanup on failure.
- * Usage:
- *   pg_dev_exec exec = pg_dev_exec_begin(numel * sizeof(float));
- *   if (!exec.ok) return NULL;
- *   
- *   pg_dev_buf da = pg_dev_buf_new(...);
- *   pg_dev_buf db = pg_dev_buf_new(...);
- *   pg_dev_buf dc = pg_dev_buf_new(...);
- *   if (!pg_dev_exec_check(&exec, da.ptr && db.ptr && dc.ptr)) goto cleanup;
- *   
- *   if (!pg_dev_exec_check(&exec, pg_copy_h2d(...) == PG_OK)) goto cleanup;
- *   ...
- *   
- * cleanup:
- *   pg_dev_buf_free(&da);
- *   pg_dev_buf_free(&db);
- *   pg_dev_buf_free(&dc);
- *   pg_dev_exec_end(&exec);
- *   return exec.ok ? result : NULL;
- */
-typedef struct {
-    bool ok;
-    pg_tensor *result;
-} pg_dev_exec;
-
-pg_dev_exec pg_dev_exec_begin(pg_tensor *result);
-bool pg_dev_exec_check(pg_dev_exec *exec, bool condition);
-void pg_dev_exec_end(pg_dev_exec *exec);
 
 void pg_gemm(size_t m, size_t n, size_t k,
              const float *a, size_t lda,

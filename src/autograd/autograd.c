@@ -3,7 +3,9 @@
 #include "../backend/backend.h"
 #include "../backend/cpu/gemm.h"
 #include "../ops/activations.h"
+#include "../ops/conv.h"
 #include "../ops/elementwise.h"
+#include "../ops/index.h"
 #include "../ops/matmul.h"
 #include "../ops/norm.h"
 #include "../ops/reduce.h"
@@ -11,9 +13,44 @@
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../jit/jit.h"
+
+/* ---- JIT autograd state ---- */
+static bool g_ag_jit_enabled = true;
+static char g_ag_last_err[512] = {0};
+static bool g_ag_last_was_jit = false;
+static size_t g_ag_jit_hits = 0, g_ag_jit_fallbacks = 0;
+
+static void ag_set_err(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_ag_last_err, sizeof(g_ag_last_err), fmt, ap);
+    va_end(ap);
+}
+
+static bool ag_op_is_jit_elementwise(pg_ag_op_t op) {
+    switch (op) {
+        case PG_AG_OP_ADD: case PG_AG_OP_SUB: case PG_AG_OP_MUL: case PG_AG_OP_DIV:
+        case PG_AG_OP_NEG: case PG_AG_OP_EXP: case PG_AG_OP_LOG: case PG_AG_OP_SQRT:
+        case PG_AG_OP_SIN: case PG_AG_OP_COS: case PG_AG_OP_RELU:
+        case PG_AG_OP_SIGMOID: case PG_AG_OP_TANH:
+            return true;
+        default: return false;
+    }
+}
+
+void pg_autograd_set_jit(bool enabled) { g_ag_jit_enabled = enabled; }
+bool pg_autograd_is_jit_enabled(void) { return g_ag_jit_enabled; }
+const char *pg_autograd_last_error(void) { return g_ag_last_err; }
+bool pg_autograd_last_was_jit(void) { return g_ag_last_was_jit; }
+size_t pg_autograd_jit_hits(void) { return g_ag_jit_hits; }
+size_t pg_autograd_jit_fallbacks(void) { return g_ag_jit_fallbacks; }
 
 static pg_node *node_wrap(pg_tensor *t, bool requires_grad)
 {
@@ -25,11 +62,12 @@ static pg_node *node_wrap(pg_tensor *t, bool requires_grad)
     n->value = t;
     n->requires_grad = requires_grad;
     n->refs = 1;
+    n->ag_op = PG_AG_OP_NONE;
     return n;
 }
 
 static pg_node *attach(pg_tensor *value, size_t nparents, pg_node **parents,
-                       void (*backward)(pg_node *), void *ctx)
+                       void (*backward)(pg_node *), void *ctx, pg_ag_op_t ag_op)
 {
     pg_node *n = calloc(1, sizeof(*n));
     if (!n) {
@@ -40,6 +78,7 @@ static pg_node *attach(pg_tensor *value, size_t nparents, pg_node **parents,
     n->value = value;
     n->backward = backward;
     n->ctx = ctx;
+    n->ag_op = ag_op;
     n->refs = 1;
 
     if (nparents) {
@@ -475,7 +514,6 @@ static void bwd_matmul(pg_node *n)
     bool use_gemm = (am * bn * ak > 4096) && !av && !bv;
     float *tmp_trans = NULL;
     float *tmp_out = NULL;
-    size_t tmp_trans_cap = 0, tmp_out_cap = 0;
     if (use_gemm) {
         size_t need_trans = ak * bn > am * ak ? ak * bn : am * ak;
         size_t need_out = am * ak > ak * bn ? am * ak : ak * bn;
@@ -485,9 +523,6 @@ static void bwd_matmul(pg_node *n)
             free(tmp_trans); free(tmp_out);
             tmp_trans = NULL; tmp_out = NULL;
             use_gemm = false;
-        } else {
-            tmp_trans_cap = need_trans;
-            tmp_out_cap = need_out;
         }
     }
 
@@ -594,40 +629,40 @@ static void bwd_softmax(pg_node *n)
     pg_tensor_free(gx);
 }
 
-#define BINARY_OP(agn, opn, bwd)                                   \
+#define BINARY_OP(agn, opn, bwd, op_enum)                             \
     pg_node *agn(pg_node *a, pg_node *b)                           \
     {                                                              \
         assert(a && b && a->value && b->value);                    \
         pg_tensor *v = opn(a->value, b->value);                    \
         if (!v)                                                    \
             return NULL;                                           \
-        return attach(v, 2, (pg_node *[]){a, b}, bwd, NULL);       \
+        return attach(v, 2, (pg_node *[]){a, b}, bwd, NULL, op_enum); \
     }
 
-BINARY_OP(pg_ag_add, pg_add, bwd_add)
-BINARY_OP(pg_ag_sub, pg_sub, bwd_sub)
-BINARY_OP(pg_ag_mul, pg_mul, bwd_mul)
-BINARY_OP(pg_ag_div, pg_div, bwd_div)
+BINARY_OP(pg_ag_add, pg_add, bwd_add, PG_AG_OP_ADD)
+BINARY_OP(pg_ag_sub, pg_sub, bwd_sub, PG_AG_OP_SUB)
+BINARY_OP(pg_ag_mul, pg_mul, bwd_mul, PG_AG_OP_MUL)
+BINARY_OP(pg_ag_div, pg_div, bwd_div, PG_AG_OP_DIV)
 
-#define UNARY_OP(agn, opn, bwd)                                    \
+#define UNARY_OP(agn, opn, bwd, op_enum)                               \
     pg_node *agn(pg_node *a)                                       \
     {                                                              \
         assert(a && a->value);                                     \
         pg_tensor *v = opn(a->value);                              \
         if (!v)                                                    \
             return NULL;                                           \
-        return attach(v, 1, &a, bwd, NULL);                        \
+        return attach(v, 1, &a, bwd, NULL, op_enum);               \
     }
 
-UNARY_OP(pg_ag_neg, pg_neg, bwd_neg)
-UNARY_OP(pg_ag_exp, pg_exp, bwd_exp)
-UNARY_OP(pg_ag_log, pg_log, bwd_log)
-UNARY_OP(pg_ag_sqrt, pg_sqrt, bwd_sqrt)
-UNARY_OP(pg_ag_sin, pg_sin, bwd_sin)
-UNARY_OP(pg_ag_cos, pg_cos, bwd_cos)
-UNARY_OP(pg_ag_relu, pg_relu, bwd_relu)
-UNARY_OP(pg_ag_sigmoid, pg_sigmoid, bwd_sigmoid)
-UNARY_OP(pg_ag_tanh, pg_tanh, bwd_tanh)
+UNARY_OP(pg_ag_neg, pg_neg, bwd_neg, PG_AG_OP_NEG)
+UNARY_OP(pg_ag_exp, pg_exp, bwd_exp, PG_AG_OP_EXP)
+UNARY_OP(pg_ag_log, pg_log, bwd_log, PG_AG_OP_LOG)
+UNARY_OP(pg_ag_sqrt, pg_sqrt, bwd_sqrt, PG_AG_OP_SQRT)
+UNARY_OP(pg_ag_sin, pg_sin, bwd_sin, PG_AG_OP_SIN)
+UNARY_OP(pg_ag_cos, pg_cos, bwd_cos, PG_AG_OP_COS)
+UNARY_OP(pg_ag_relu, pg_relu, bwd_relu, PG_AG_OP_RELU)
+UNARY_OP(pg_ag_sigmoid, pg_sigmoid, bwd_sigmoid, PG_AG_OP_SIGMOID)
+UNARY_OP(pg_ag_tanh, pg_tanh, bwd_tanh, PG_AG_OP_TANH)
 
 pg_node *pg_ag_matmul(pg_node *a, pg_node *b)
 {
@@ -635,7 +670,84 @@ pg_node *pg_ag_matmul(pg_node *a, pg_node *b)
     pg_tensor *v = pg_matmul(a->value, b->value);
     if (!v)
         return NULL;
-    return attach(v, 2, (pg_node *[]){a, b}, bwd_matmul, NULL);
+    return attach(v, 2, (pg_node *[]){a, b}, bwd_matmul, NULL, PG_AG_OP_MATMUL);
+}
+
+typedef struct { size_t axis0; size_t axis1; } transpose_ctx;
+
+static void bwd_transpose(pg_node *n)
+{
+    transpose_ctx *cx = (transpose_ctx *)n->ctx;
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    pg_tensor *g = n->grad;
+    size_t ndim = g->ndim;
+    size_t shape[PG_MAX_NDIM], stride[PG_MAX_NDIM];
+    for (size_t i = 0; i < ndim; i++) {
+        size_t axis = (i == cx->axis0) ? cx->axis1 : (i == cx->axis1 ? cx->axis0 : i);
+        shape[i] = g->shape[axis];
+        stride[i] = g->stride[axis];
+    }
+    pg_tensor *gt = pg_tensor_empty(ndim, shape);
+    if (!gt) return;
+    for (size_t i = 0; i < g->numel; i++) {
+        size_t idx[PG_MAX_NDIM], idx_t[PG_MAX_NDIM];
+        size_t tmp = i;
+        for (size_t d = ndim; d-- > 0;) {
+            idx[d] = tmp % g->shape[d];
+            tmp /= g->shape[d];
+        }
+        for (size_t d = 0; d < ndim; d++) {
+            size_t axis = (d == cx->axis0) ? cx->axis1 : (d == cx->axis1 ? cx->axis0 : d);
+            idx_t[axis] = idx[d];
+        }
+        size_t off_t = 0, off_g = 0;
+        for (size_t d = 0; d < ndim; d++) {
+            off_t += idx_t[d] * gt->stride[d];
+            off_g += idx[d] * g->stride[d];
+        }
+        gt->data[off_t] = g->data[off_g];
+    }
+    accum(p, gt, 1.0f);
+    pg_tensor_free(gt);
+}
+
+pg_node *pg_ag_transpose(pg_node *a, size_t axis0, size_t axis1)
+{
+    assert(a && a->value);
+    size_t ndim = a->value->ndim;
+    assert(axis0 < ndim && axis1 < ndim);
+    size_t nshape[PG_MAX_NDIM];
+    for (size_t i = 0; i < ndim; i++)
+        nshape[i] = a->value->shape[i];
+    nshape[axis0] = a->value->shape[axis1];
+    nshape[axis1] = a->value->shape[axis0];
+    pg_tensor *v = pg_tensor_empty(ndim, nshape);
+    if (!v)
+        return NULL;
+    const pg_tensor *src = a->value;
+    for (size_t i = 0; i < src->numel; i++) {
+        size_t idx[PG_MAX_NDIM], idx_t[PG_MAX_NDIM];
+        size_t tmp = i;
+        for (size_t d = ndim; d-- > 0;) {
+            idx[d] = tmp % src->shape[d];
+            tmp /= src->shape[d];
+        }
+        for (size_t d = 0; d < ndim; d++) {
+            idx_t[d] = idx[(d == axis0) ? axis1 : (d == axis1) ? axis0 : d];
+        }
+        size_t off_t = 0, off_s = 0;
+        for (size_t d = 0; d < ndim; d++) {
+            off_t += idx_t[d] * v->stride[d];
+            off_s += idx[d] * src->stride[d];
+        }
+        v->data[off_t] = src->data[off_s];
+    }
+    transpose_ctx *cx = malloc(sizeof(*cx));
+    if (!cx) { pg_tensor_free(v); return NULL; }
+    cx->axis0 = axis0; cx->axis1 = axis1;
+    return attach(v, 1, &a, bwd_transpose, cx, PG_AG_OP_TRANSPOSE);
 }
 
 static pg_node *ag_reduce(pg_node *a, size_t axis, bool keepdim, bool mean)
@@ -655,7 +767,8 @@ static pg_node *ag_reduce(pg_node *a, size_t axis, bool keepdim, bool mean)
         return NULL;
     }
 
-    pg_node *r = attach(v, 1, &a, mean ? bwd_mean : bwd_sum, cx);
+    pg_node *r = attach(v, 1, &a, mean ? bwd_mean : bwd_sum, cx,
+                        mean ? PG_AG_OP_MEAN : PG_AG_OP_SUM);
     if (!r)
         free(cx);
     return r;
@@ -714,7 +827,7 @@ pg_node *pg_ag_softmax(pg_node *a, size_t axis)
         return NULL;
     }
 
-    pg_node *r = attach(v, 1, &a, bwd_softmax, cx);
+    pg_node *r = attach(v, 1, &a, bwd_softmax, cx, PG_AG_OP_SOFTMAX);
     if (!r)
         free(cx);
     return r;
@@ -774,9 +887,6 @@ static void bwd_layernorm(pg_node *n){
         double var=0; for(size_t i=0;i<N;i++){ double d=row[i]-mean; var+=d*d; } var/=N;
         float rstd=1.0f/sqrtf((float)var + eps);
         float invN = 1.0f / (float)N;
-        // compute xn
-        // we can compute on fly
-        // need sums: sum_gw and sum_gw_xn
         float sum_gw=0, sum_gw_xn=0;
         for(size_t i=0;i<N;i++){
             float gw = grow[i] * (w? w[i]:1.0f);
@@ -822,16 +932,13 @@ static void bwd_rmsnorm(pg_node *n){
         float var=(float)(sumsq/N);
         float rstd=1.0f/sqrtf(var+eps);
         float invN = 1.0f/(float)N;
-        // need sum_gw_x for rmsnorm grad
         float sum_gw_x=0;
         for(size_t i=0;i<N;i++){
             float gw=grow[i]*(w?w[i]:1.0f);
             sum_gw_x += gw * row[i];
         }
-        float scale = rstd;
-        float coeff = - sum_gw_x * rstd * rstd * rstd * invN; // derivative of rstd w.r.t x includes sum term
-        // simplified formula: dx = rstd*gw - x * (rstd^3 * invN * sum_gw_x)
-        // where gw = grad_y * w
+        // gw = grad_y * w; dx = rstd*gw - x * (rstd^3 * invN * sum_gw_x)
+        float coeff = - sum_gw_x * rstd * rstd * rstd * invN;
         for(size_t i=0;i<N;i++){
             float gw=grow[i]*(w?w[i]:1.0f);
             float dx = gw * rstd + row[i] * coeff;
@@ -854,7 +961,7 @@ pg_node *pg_ag_layernorm(pg_node *x, pg_node *weight, pg_node *bias, float eps){
     cx->has_b = bias != NULL;
     size_t npar = 1 + (weight?1:0) + (bias?1:0);
     pg_node *pars[3]; size_t idx=0; pars[idx++]=x; if(weight) pars[idx++]=weight; if(bias) pars[idx++]=bias;
-    pg_node *r=attach(v, npar, pars, bwd_layernorm, cx);
+    pg_node *r=attach(v, npar, pars, bwd_layernorm, cx, PG_AG_OP_LAYERNORM);
     if(!r) free(cx);
     return r;
 }
@@ -869,8 +976,417 @@ pg_node *pg_ag_rmsnorm(pg_node *x, pg_node *weight, float eps){
     cx->has_w = weight != NULL;
     size_t npar = 1 + (weight?1:0);
     pg_node *pars[2]; pars[0]=x; if(weight) pars[1]=weight;
-    pg_node *r=attach(v, npar, pars, bwd_rmsnorm, cx);
+    pg_node *r=attach(v, npar, pars, bwd_rmsnorm, cx, PG_AG_OP_RMSNORM);
     if(!r) free(cx);
+    return r;
+}
+
+// ---------- conv2d / embedding / dropout ----------
+
+typedef struct { size_t kh, kw; int stride, padding; } conv_ctx;
+
+static void bwd_conv(pg_node *n)
+{
+    conv_ctx *cx = (conv_ctx *)n->ctx;
+    pg_node *px = n->parents[0];
+    pg_node *pw = n->parents[1];
+    pg_node *pb = n->nparents > 2 ? n->parents[2] : NULL;
+    const pg_tensor *x = px->value;
+    const pg_tensor *g = n->grad;
+    size_t N = x->shape[0], Cin = x->shape[1], H = x->shape[2], W = x->shape[3];
+    size_t Cout = pw->value->shape[0], kh = cx->kh, kw = cx->kw;
+    int s = cx->stride, p = cx->padding;
+    size_t OH = g->shape[2], OW = g->shape[3];
+
+    if (pb && pb->requires_grad) {
+        ensure_grad(pb);
+        for (size_t co = 0; co < Cout; co++) {
+            float acc = 0.0f;
+            for (size_t ni = 0; ni < N; ni++)
+                for (size_t oh = 0; oh < OH; oh++)
+                    for (size_t ow = 0; ow < OW; ow++)
+                        acc += g->data[(ni * Cout + co) * OH * OW + oh * OW + ow];
+            pb->grad->data[co] += acc;
+        }
+    }
+    if (pw->requires_grad) {
+        ensure_grad(pw);
+        float *dw = pw->grad->data;
+        for (size_t ni = 0; ni < N; ni++)
+            for (size_t co = 0; co < Cout; co++)
+                for (size_t oh = 0; oh < OH; oh++)
+                    for (size_t ow = 0; ow < OW; ow++) {
+                        float gg = g->data[(ni * Cout + co) * OH * OW + oh * OW + ow];
+                        if (gg == 0.0f)
+                            continue;
+                        for (size_t ci = 0; ci < Cin; ci++)
+                            for (size_t i = 0; i < kh; i++)
+                                for (size_t j = 0; j < kw; j++) {
+                                    long ph = (long)oh * s - p + (long)i;
+                                    long pw2 = (long)ow * s - p + (long)j;
+                                    if (ph >= 0 && ph < (long)H && pw2 >= 0 && pw2 < (long)W) {
+                                        size_t xidx = (ni * Cin + ci) * H * W +
+                                                       (size_t)ph * W + (size_t)pw2;
+                                        dw[((co * Cin + ci) * kh + i) * kw + j] += gg * x->data[xidx];
+                                    }
+                                }
+                    }
+    }
+    if (px->requires_grad) {
+        ensure_grad(px);
+        float *dx = px->grad->data;
+        const float *wv = pw->value->data;
+        for (size_t ni = 0; ni < N; ni++)
+            for (size_t co = 0; co < Cout; co++)
+                for (size_t oh = 0; oh < OH; oh++)
+                    for (size_t ow = 0; ow < OW; ow++) {
+                        float gg = g->data[(ni * Cout + co) * OH * OW + oh * OW + ow];
+                        if (gg == 0.0f)
+                            continue;
+                        for (size_t ci = 0; ci < Cin; ci++)
+                            for (size_t i = 0; i < kh; i++)
+                                for (size_t j = 0; j < kw; j++) {
+                                    long ph = (long)oh * s - p + (long)i;
+                                    long pw2 = (long)ow * s - p + (long)j;
+                                    if (ph >= 0 && ph < (long)H && pw2 >= 0 && pw2 < (long)W) {
+                                        size_t xidx = (ni * Cin + ci) * H * W +
+                                                       (size_t)ph * W + (size_t)pw2;
+                                        dx[xidx] += gg * wv[((co * Cin + ci) * kh + i) * kw + j];
+                                    }
+                                }
+                    }
+    }
+}
+
+pg_node *pg_ag_conv2d(pg_node *x, pg_node *w, pg_node *b, size_t kh, size_t kw,
+                      int stride, int padding)
+{
+    assert(x && w && x->value && w->value);
+    pg_conv2d_cfg cfg = {stride, padding};
+    pg_tensor *v = pg_conv2d(x->value, w->value, b ? b->value : NULL, cfg);
+    if (!v)
+        return NULL;
+    conv_ctx *cx = malloc(sizeof(*cx));
+    if (!cx) {
+        pg_tensor_free(v);
+        return NULL;
+    }
+    cx->kh = kh;
+    cx->kw = kw;
+    cx->stride = stride;
+    cx->padding = padding;
+    size_t np = b ? 3 : 2;
+    pg_node *pars[3] = {x, w, b};
+    pg_node *r = attach(v, np, pars, bwd_conv, cx, PG_AG_OP_CONV2D);
+    if (!r)
+        free(cx);
+    return r;
+}
+
+typedef struct { size_t *idx; size_t n; size_t E; } emb_ctx;
+
+static void bwd_embedding(pg_node *n)
+{
+    emb_ctx *cx = (emb_ctx *)n->ctx;
+    pg_node *pw = n->parents[0];
+    if (!pw->requires_grad)
+        return;
+    ensure_grad(pw);
+    const pg_tensor *g = n->grad;
+    float *dw = pw->grad->data;
+    for (size_t i = 0; i < cx->n; i++) {
+        size_t row = cx->idx[i];
+        for (size_t e = 0; e < cx->E; e++)
+            dw[row * cx->E + e] += g->data[i * cx->E + e];
+    }
+}
+
+pg_node *pg_ag_embedding(pg_node *weight, const pg_tensor *indices)
+{
+    assert(weight && indices && weight->value && indices->data);
+    assert(weight->value->ndim == 2);
+    pg_tensor *v = pg_embedding(weight->value, indices);
+    if (!v)
+        return NULL;
+    size_t n = indices->numel, E = weight->value->shape[1];
+    emb_ctx *cx = malloc(sizeof(*cx) + n * sizeof(size_t));
+    if (!cx) {
+        pg_tensor_free(v);
+        return NULL;
+    }
+    cx->n = n;
+    cx->E = E;
+    cx->idx = (size_t *)((char *)cx + sizeof(*cx));
+    for (size_t i = 0; i < n; i++)
+        cx->idx[i] = (size_t)indices->data[i];
+    pg_node *r = attach(v, 1, &weight, bwd_embedding, cx, PG_AG_OP_EMBEDDING);
+    if (!r)
+        free(cx);
+    return r;
+}
+
+static uint64_t pg_drop_rng = 0x9E3779B97F4A7C15ULL;
+static float pg_drop_rand(void)
+{
+    uint64_t z = (pg_drop_rng += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    return (float)(z >> 40) * (1.0f / 16777216.0f);
+}
+
+typedef struct { float *mask; size_t n; float scale; bool training; } drop_ctx;
+
+static void bwd_dropout(pg_node *n)
+{
+    drop_ctx *cx = (drop_ctx *)n->ctx;
+    pg_node *px = n->parents[0];
+    if (!px->requires_grad)
+        return;
+    ensure_grad(px);
+    const pg_tensor *g = n->grad;
+    float *dx = px->grad->data;
+    if (!cx->training) {
+        for (size_t i = 0; i < cx->n; i++)
+            dx[i] += g->data[i];
+    } else {
+        for (size_t i = 0; i < cx->n; i++)
+            dx[i] += g->data[i] * cx->mask[i] * cx->scale;
+    }
+}
+
+pg_tensor *pg_dropout(const pg_tensor *x, float p, bool training)
+{
+    assert(x && x->data);
+    if (!training || p <= 0.0f)
+        return pg_tensor_clone(x);
+    pg_tensor *out = pg_tensor_empty(x->ndim, x->shape);
+    if (!out)
+        return NULL;
+    float scale = 1.0f / (1.0f - p);
+    for (size_t i = 0; i < x->numel; i++) {
+        float r = pg_drop_rand();
+        if (r < p)
+            out->data[i] = 0.0f;
+        else
+            out->data[i] = x->data[i] * scale;
+    }
+    return out;
+}
+
+pg_node *pg_ag_dropout(pg_node *x, float p, bool training)
+{
+    assert(x && x->value);
+    float scale = (p < 1.0f) ? 1.0f / (1.0f - p) : 1.0f;
+    pg_tensor *v = pg_tensor_empty(x->value->ndim, x->value->shape);
+    if (!v)
+        return NULL;
+    drop_ctx *cx = malloc(sizeof(*cx) + x->value->numel * sizeof(float));
+    if (!cx) {
+        pg_tensor_free(v);
+        return NULL;
+    }
+    cx->n = x->value->numel;
+    cx->scale = scale;
+    cx->training = training && p > 0.0f;
+    cx->mask = (float *)((char *)cx + sizeof(*cx));
+    if (cx->training) {
+        for (size_t i = 0; i < cx->n; i++) {
+            float r = pg_drop_rand();
+            if (r < p) {
+                cx->mask[i] = 0.0f;
+                v->data[i] = 0.0f;
+            } else {
+                cx->mask[i] = 1.0f;
+                v->data[i] = x->value->data[i] * scale;
+            }
+        }
+    } else {
+        for (size_t i = 0; i < cx->n; i++) {
+            cx->mask[i] = 1.0f;
+            v->data[i] = x->value->data[i];
+        }
+    }
+    pg_node *r = attach(v, 1, &x, bwd_dropout, cx, PG_AG_OP_DROPOUT);
+    if (!r)
+        free(cx);
+    return r;
+}
+
+// ---------- loss functions (training) ----------
+
+typedef struct {
+    size_t rows;
+    size_t cls;
+    bool mean;
+    size_t *targets;
+} ce_ctx;
+
+static void bwd_cross_entropy(pg_node *n)
+{
+    ce_ctx *cx = n->ctx;
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    const pg_tensor *L = p->value;
+    size_t R = cx->rows, C = cx->cls;
+    pg_tensor *g = pg_tensor_zeros(L->ndim, L->shape);
+    if (!g)
+        return;
+    float scale = cx->mean ? 1.0f / (float)R : 1.0f;
+    for (size_t r = 0; r < R; r++) {
+        size_t base = r * C;
+        float m = -INFINITY;
+        for (size_t c = 0; c < C; c++)
+            if (L->data[base + c] > m)
+                m = L->data[base + c];
+        float s = 0.0f;
+        for (size_t c = 0; c < C; c++)
+            s += expf(L->data[base + c] - m);
+        float inv = 1.0f / s;
+        for (size_t c = 0; c < C; c++) {
+            float prob = expf(L->data[base + c] - m) * inv;
+            float onehot = (c == cx->targets[r]) ? 1.0f : 0.0f;
+            g->data[base + c] = (prob - onehot) * scale;
+        }
+    }
+    accum(p, g, 1.0f);
+    pg_tensor_free(g);
+}
+
+pg_node *pg_ag_cross_entropy(pg_node *logits, const size_t *targets, size_t n, bool mean)
+{
+    assert(logits && logits->value && targets);
+    pg_tensor *L = logits->value;
+    size_t cls = L->shape[L->ndim - 1];
+    size_t rows = L->numel / cls;
+    assert(rows == n);
+#ifndef NDEBUG
+    for (size_t r = 0; r < n; r++)
+        assert(targets[r] < cls);
+#endif
+
+    float total = 0.0f;
+    for (size_t r = 0; r < rows; r++) {
+        size_t base = r * cls;
+        float m = -INFINITY;
+        for (size_t c = 0; c < cls; c++)
+            if (L->data[base + c] > m)
+                m = L->data[base + c];
+        float s = 0.0f;
+        for (size_t c = 0; c < cls; c++)
+            s += expf(L->data[base + c] - m);
+        float lse = logf(s) + m;
+        total += lse - L->data[base + targets[r]];
+    }
+    float loss = mean ? total / (float)rows : total;
+
+    pg_tensor *v = pg_tensor_full(1, (size_t[]){1}, loss);
+    if (!v)
+        return NULL;
+    ce_ctx *cx = malloc(sizeof(*cx));
+    if (!cx) {
+        pg_tensor_free(v);
+        return NULL;
+    }
+    cx->rows = rows;
+    cx->cls = cls;
+    cx->mean = mean;
+    cx->targets = malloc(n * sizeof(size_t));
+    if (!cx->targets) {
+        free(cx);
+        pg_tensor_free(v);
+        return NULL;
+    }
+    memcpy(cx->targets, targets, n * sizeof(size_t));
+
+    pg_node *r = attach(v, 1, &logits, bwd_cross_entropy, cx, PG_AG_OP_CROSS_ENTROPY);
+    if (!r) {
+        free(cx->targets);
+        free(cx);
+    }
+    return r;
+}
+
+pg_node *pg_ag_mse(pg_node *pred, pg_node *target, bool mean)
+{
+    assert(pred && target);
+    pg_node *d = pg_ag_sub(pred, target);
+    if (!d)
+        return NULL;
+    pg_node *sq = pg_ag_mul(d, d);
+    pg_node_free(d);
+    if (!sq)
+        return NULL;
+    pg_node *loss = mean ? pg_ag_mean_all(sq) : pg_ag_sum_all(sq);
+    pg_node_free(sq);
+    return loss;
+}
+
+typedef struct {
+    size_t n;
+    bool mean;
+    float *targets;
+} bce_ctx;
+
+static void bwd_bce(pg_node *n)
+{
+    bce_ctx *cx = n->ctx;
+    pg_node *p = n->parents[0];
+    if (!p->requires_grad)
+        return;
+    const pg_tensor *L = p->value;
+    size_t N = cx->n;
+    float scale = cx->mean ? 1.0f / (float)N : 1.0f;
+    pg_tensor *g = pg_tensor_zeros(L->ndim, L->shape);
+    if (!g)
+        return;
+    for (size_t i = 0; i < N; i++) {
+        float z = L->data[i];
+        float s = 1.0f / (1.0f + expf(-z));
+        g->data[i] = (s - cx->targets[i]) * scale;
+    }
+    accum(p, g, 1.0f);
+    pg_tensor_free(g);
+}
+
+pg_node *pg_ag_bce_with_logits(pg_node *logits, const float *targets, size_t n, bool mean)
+{
+    assert(logits && logits->value && targets);
+    const pg_tensor *L = logits->value;
+    assert(L->numel == n);
+
+    float total = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float z = L->data[i];
+        float t = targets[i];
+        total += fmaxf(z, 0.0f) - z * t + log1pf(expf(-fabsf(z)));
+    }
+    float loss = mean ? total / (float)n : total;
+
+    pg_tensor *v = pg_tensor_full(1, (size_t[]){1}, loss);
+    if (!v)
+        return NULL;
+    bce_ctx *cx = malloc(sizeof(*cx));
+    if (!cx) {
+        pg_tensor_free(v);
+        return NULL;
+    }
+    cx->n = n;
+    cx->mean = mean;
+    cx->targets = malloc(n * sizeof(float));
+    if (!cx->targets) {
+        free(cx);
+        pg_tensor_free(v);
+        return NULL;
+    }
+    memcpy(cx->targets, targets, n * sizeof(float));
+
+    pg_node *r = attach(v, 1, &logits, bwd_bce, cx, PG_AG_OP_BCE);
+    if (!r) {
+        free(cx->targets);
+        free(cx);
+    }
     return r;
 }
 
@@ -938,11 +1454,496 @@ static void topo_sort(pg_node *root, node_vec *order)
     free(stk);
 }
 
+/* ---------- JIT autograd helpers ---------- */
+static int find_order_idx(node_vec *order, pg_node *n) {
+    for (size_t i = 0; i < order->n; i++) if (order->items[i] == n) return (int)i;
+    return -1;
+}
+
+/* map from pg_node* to jit input id for saved values */
+typedef struct { pg_node *node; int jit_id; } val_map_t;
+
+static int jit_get_val_input(pg_jit_graph *jg, pg_node *p, val_map_t **maps, size_t *nmaps, size_t *cap) {
+    for (size_t i = 0; i < *nmaps; i++) if ((*maps)[i].node == p) return (*maps)[i].jit_id;
+    if (*nmaps == *cap) {
+        size_t nc = *cap ? *cap * 2 : 8;
+        val_map_t *nm = realloc(*maps, nc * sizeof(*nm));
+        if (!nm) return -1;
+        *maps = nm; *cap = nc;
+    }
+    int id = pg_jit_add_input(jg, p->value->ndim, p->value->shape);
+    if (id < 0) return -1;
+    (*maps)[*nmaps].node = p;
+    (*maps)[*nmaps].jit_id = id;
+    (*nmaps)++;
+    return id;
+}
+
+static bool ag_needs_val_for_parent(pg_ag_op_t op, size_t parent_idx) {
+    switch (op) {
+        case PG_AG_OP_ADD: case PG_AG_OP_SUB: case PG_AG_OP_NEG: return false;
+        case PG_AG_OP_MUL: case PG_AG_OP_DIV: return true;
+        case PG_AG_OP_EXP: case PG_AG_OP_LOG: case PG_AG_OP_SQRT:
+        case PG_AG_OP_SIN: case PG_AG_OP_COS: case PG_AG_OP_RELU:
+        case PG_AG_OP_SIGMOID: case PG_AG_OP_TANH: return parent_idx == 0;
+        default: return false;
+    }
+}
+static bool is_bcast_compat(size_t ndim_a, const size_t *shape_a, size_t ndim_b, const size_t *shape_b) {
+    if (ndim_a > ndim_b) return false;
+    size_t off = ndim_b - ndim_a;
+    for (size_t i=0;i<ndim_b;i++) {
+        size_t da = i < off ? 1 : shape_a[i - off];
+        size_t db = shape_b[i];
+        if (da != db && da != 1) return false;
+    }
+    return true;
+}
+
+static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool require_full);
+
+static bool try_jit_backward_internal_full(pg_node *loss, node_vec *order) {
+    return try_jit_backward_internal_ex(loss, order, true);
+}
+static bool try_jit_backward_internal(pg_node *loss, node_vec *order) {
+    return try_jit_backward_internal_ex(loss, order, false);
+}
+static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool require_full) {
+    if (!loss || !order || order->n == 0) { ag_set_err("empty order"); return false; }
+    /* step 1: handle reduction prefix (sum/mean chain) leading to scalar loss */
+    pg_node *eff_loss = loss;
+    float red_scale = 1.0f;
+    size_t red_steps = 0;
+    pg_node *prefix_nodes[32];
+    size_t n_prefix = 0;
+    while (eff_loss && (eff_loss->ag_op == PG_AG_OP_SUM || eff_loss->ag_op == PG_AG_OP_MEAN)) {
+        if (n_prefix >= 32) { ag_set_err("too many reductions"); return false; }
+        prefix_nodes[n_prefix++] = eff_loss;
+        if (eff_loss->ag_op == PG_AG_OP_MEAN) {
+            red_ctx *rc = (red_ctx*)eff_loss->ctx;
+            if (!eff_loss->nparents || !eff_loss->parents[0] || !eff_loss->parents[0]->value) { ag_set_err("mean parent missing"); return false; }
+            size_t axis = rc->axis;
+            if (axis >= eff_loss->parents[0]->value->ndim) { ag_set_err("mean axis oob"); return false; }
+            size_t dim = eff_loss->parents[0]->value->shape[axis];
+            if (dim == 0) { ag_set_err("mean dim 0"); return false; }
+            red_scale *= 1.0f / (float)dim;
+        }
+        if (eff_loss->nparents == 0) break;
+        eff_loss = eff_loss->parents[0];
+        if (++red_steps > 32) { ag_set_err("red loop"); return false; }
+        if (eff_loss == loss) { ag_set_err("cycle"); return false; }
+    }
+    if (!eff_loss) { ag_set_err("no eff loss"); return false; }
+    if (eff_loss->ag_op == PG_AG_OP_NONE) {
+        ag_set_err("no elementwise eff_loss");
+        return false;
+    }
+    if (!ag_op_is_jit_elementwise(eff_loss->ag_op)) {
+        ag_set_err("eff_loss not jit elementwise %d", eff_loss->ag_op);
+        return false;
+    }
+    size_t loop_ndim = eff_loss->value->ndim;
+    size_t loop_shape[PG_MAX_NDIM];
+    memcpy(loop_shape, eff_loss->value->shape, loop_ndim * sizeof(size_t));
+    size_t loop_numel = eff_loss->value->numel;
+
+    /* find suffix of elementwise ops with same loop_shape reachable from eff_loss */
+    bool *in_suffix = calloc(order->n, sizeof(bool));
+    int *queue = malloc(order->n * sizeof(int));
+    if (!in_suffix || !queue) { free(in_suffix); free(queue); ag_set_err("oom suffix"); return false; }
+    int eff_idx = find_order_idx(order, eff_loss);
+    if (eff_idx < 0) { free(in_suffix); free(queue); ag_set_err("eff idx not found"); return false; }
+    size_t qh=0, qt=0;
+    queue[qt++] = eff_idx;
+    in_suffix[eff_idx]=true;
+    while (qh < qt) {
+        int idx = queue[qh++];
+        pg_node *n = order->items[idx];
+        for (size_t pi=0; pi<n->nparents; pi++) {
+            pg_node *par = n->parents[pi];
+            int p_idx = find_order_idx(order, par);
+            if (p_idx < 0) continue;
+            if (in_suffix[p_idx]) continue;
+            pg_node *pn = order->items[p_idx];
+            if (pn->ag_op == PG_AG_OP_NONE) continue;
+            if (!ag_op_is_jit_elementwise(pn->ag_op)) continue;
+            if (pn->value->ndim != loop_ndim || pn->value->numel != loop_numel || !pg_shape_equal(pn->value->ndim, pn->value->shape, loop_ndim, loop_shape)) continue;
+            in_suffix[p_idx]=true;
+            queue[qt++]=p_idx;
+        }
+    }
+    free(queue);
+    /* count suffix nodes */
+    size_t n_suffix=0;
+    for (size_t i=0;i<order->n;i++) if(in_suffix[i]) n_suffix++;
+    if (n_suffix==0) { free(in_suffix); ag_set_err("no suffix"); return false; }
+
+    /* check that all suffix nodes have same loop_shape and needed parent values have same shape */
+    for (size_t i=0;i<order->n;i++) if(in_suffix[i]) {
+        pg_node *n = order->items[i];
+        if (n->value->ndim != loop_ndim || n->value->numel != loop_numel || !pg_shape_equal(n->value->ndim, n->value->shape, loop_ndim, loop_shape)) {
+            free(in_suffix); ag_set_err("suffix shape mismatch"); return false;
+        }
+        for (size_t pi=0; pi<n->nparents; pi++) {
+            if (!ag_needs_val_for_parent(n->ag_op, pi)) continue;
+            pg_node *par = n->parents[pi];
+            if (!par->value) { free(in_suffix); ag_set_err("parent value null"); return false; }
+            if (!is_bcast_compat(par->value->ndim, par->value->shape, loop_ndim, loop_shape)) {
+                free(in_suffix); ag_set_err("parent value shape mismatch for suffix"); return false;
+            }
+        }
+    }
+
+    /* collect suffix leaf inputs that require grad but are not in suffix (these will be outputs of JIT) */
+    /* also collect leaf vars in suffix that are leaves */
+    /* For suffix JIT, outputs are grads for nodes that are parents of suffix nodes but not in suffix, plus suffix leaves */
+    bool *is_suffix_output = calloc(order->n, sizeof(bool));
+    if (!is_suffix_output) { free(in_suffix); ag_set_err("oom"); return false; }
+    // First, for each suffix node, its parents that require_grad and are not in suffix will need grad output
+    for (size_t i=0;i<order->n;i++) if(in_suffix[i]) {
+        pg_node *n = order->items[i];
+        for (size_t pi=0; pi<n->nparents; pi++) {
+            pg_node *par = n->parents[pi];
+            if (!par->requires_grad) continue;
+            int p_idx = find_order_idx(order, par);
+            if (p_idx>=0 && in_suffix[p_idx]) continue; // parent also in suffix, its grad will be computed internally, not output yet
+            // parent not in suffix, but requires grad -> need to output its grad
+            if (p_idx>=0) is_suffix_output[p_idx]=true;
+            else {
+                // parent not in order (maybe not requires_grad? but we check requires_grad, so it should be in order)
+                // If parent not in order but requires_grad, it means it's a leaf not in order due to topo not including? Actually topo includes all requires_grad ancestors, so it should be in order.
+                // If not found, we need to handle as leaf input: we can still output, but we need to find its index? It's not in order, so we can't use order index. For now, treat as not output.
+            }
+        }
+    }
+    // Also, if suffix contains leaf vars (nparents==0) that require_grad, they are outputs
+    for (size_t i=0;i<order->n;i++) if(in_suffix[i]) {
+        pg_node *n = order->items[i];
+        if (n->nparents==0 && n->requires_grad) is_suffix_output[i]=true;
+    }
+
+    size_t n_out=0;
+    for (size_t i=0;i<order->n;i++) if(is_suffix_output[i]) n_out++;
+    if (n_out==0) { free(in_suffix); free(is_suffix_output); ag_set_err("no suffix outputs"); return false; }
+    if (n_out>16) { free(in_suffix); free(is_suffix_output); ag_set_err("too many suffix outputs"); return false; }
+
+    pg_jit_graph *jg = pg_jit_graph_new();
+    if (!jg) { free(in_suffix); free(is_suffix_output); ag_set_err("jg alloc fail"); return false; }
+
+    val_map_t *val_maps = NULL;
+    size_t n_val_maps = 0, cap_val_maps = 0;
+    int *grad_jit_id = calloc(order->n, sizeof(int));
+    if (!grad_jit_id) { pg_jit_graph_free(jg); free(in_suffix); free(is_suffix_output); free(val_maps); ag_set_err("oom grad map"); return false; }
+    for (size_t i = 0; i < order->n; i++) grad_jit_id[i] = -1;
+
+    pg_tensor *g_eff_tensor = NULL;
+    int g_eff = pg_jit_add_input(jg, loop_ndim, loop_shape);
+    if (g_eff < 0) { ag_set_err("g_eff input fail %s", pg_jit_last_error()); goto jit_fail; }
+    grad_jit_id[eff_idx] = g_eff;
+
+    for (size_t i = 0; i < order->n; i++) if(in_suffix[i]) {
+        pg_node *n = order->items[i];
+        for (size_t pi = 0; pi < n->nparents; pi++) {
+            if (!ag_needs_val_for_parent(n->ag_op, pi)) continue;
+            pg_node *par = n->parents[pi];
+            int vid = jit_get_val_input(jg, par, &val_maps, &n_val_maps, &cap_val_maps);
+            if (vid < 0) { ag_set_err("val input fail %s", pg_jit_last_error()); goto jit_fail; }
+        }
+    }
+
+    #define GET_VAL_JIT(par) ({ \
+        int _vid = -1; \
+        for (size_t _k = 0; _k < n_val_maps; _k++) if (val_maps[_k].node == (par)) { _vid = val_maps[_k].jit_id; break; } \
+        _vid; \
+    })
+
+    /* iterate reverse over suffix nodes in topo order (from eff down to leaves) */
+    // order is forward leaf->loss, so suffix nodes are somewhere in middle. Reverse suffix order is from eff_idx down to 0, but only those in suffix.
+    // We should iterate order in reverse, and if in_suffix, process.
+    for (int oi = (int)order->n - 1; oi >= 0; --oi) {
+        if (!in_suffix[oi]) continue;
+        pg_node *n = order->items[oi];
+        int g_child = grad_jit_id[oi];
+        if (g_child < 0) continue;
+        for (size_t pi = 0; pi < n->nparents; pi++) {
+            pg_node *par = n->parents[pi];
+            if (!par->requires_grad) continue;
+            int p_idx = find_order_idx(order, par);
+            // par may not be in order if it's a leaf not requiring grad? But we check requires_grad, so it should be.
+            // If par not in suffix, its grad is an output, but we still need to compute it. p_idx may be -1 if par is not in order (e.g., leaf bias not in order because not requires_grad? but we check requires_grad, so it should be)
+            // For suffix inputs that are not in suffix, p_idx may be valid but in_suffix false, we still need to accumulate into that parent's grad.
+            // If p_idx <0, we need to handle as external leaf not in order: we could allocate a separate grad for it, but our grad_jit_id is only for order indices. For external leaf not in order, we need a separate handling.
+            // For now, require p_idx >=0
+            if (p_idx < 0) continue;
+            // If parent is not in suffix, its grad may be an output, but we still compute contrib for it.
+            // The parent's grad may already have a value from previous contributions (multiple children in suffix)
+            int contrib = -1;
+            int val_a = -1, val_b = -1;
+            if (n->ag_op == PG_AG_OP_MUL || n->ag_op == PG_AG_OP_DIV) {
+                val_a = GET_VAL_JIT(n->parents[0]);
+                val_b = GET_VAL_JIT(n->parents[1]);
+            } else if (n->ag_op == PG_AG_OP_EXP || n->ag_op == PG_AG_OP_LOG || n->ag_op == PG_AG_OP_SQRT ||
+                       n->ag_op == PG_AG_OP_SIN || n->ag_op == PG_AG_OP_COS || n->ag_op == PG_AG_OP_RELU ||
+                       n->ag_op == PG_AG_OP_SIGMOID || n->ag_op == PG_AG_OP_TANH) {
+                val_a = GET_VAL_JIT(n->parents[0]);
+            }
+            switch (n->ag_op) {
+                case PG_AG_OP_ADD: { contrib = g_child; break; }
+                case PG_AG_OP_SUB: {
+                    if (pi == 0) contrib = g_child;
+                    else { contrib = pg_jit_neg(jg, g_child); if (contrib < 0) { ag_set_err("neg fail"); goto jit_fail; } }
+                    break;
+                }
+                case PG_AG_OP_MUL: {
+                    int other_val = (pi == 0) ? val_b : val_a;
+                    if (other_val < 0) { ag_set_err("mul val missing"); goto jit_fail; }
+                    contrib = pg_jit_mul(jg, g_child, other_val);
+                    if (contrib < 0) { ag_set_err("mul fail %s", pg_jit_last_error()); goto jit_fail; }
+                    break;
+                }
+                case PG_AG_OP_DIV: {
+                    if (pi == 0) {
+                        int vb = val_b; if (vb < 0) { ag_set_err("div vb missing"); goto jit_fail; }
+                        contrib = pg_jit_div(jg, g_child, vb); if (contrib < 0) { ag_set_err("div fail"); goto jit_fail; }
+                    } else {
+                        int va = val_a; int vb = val_b; if (va < 0 || vb < 0) { ag_set_err("div vals missing"); goto jit_fail; }
+                        int vb2 = pg_jit_mul(jg, vb, vb); if (vb2 < 0) goto jit_fail;
+                        int num = pg_jit_mul(jg, g_child, va); if (num < 0) goto jit_fail;
+                        int div_tmp = pg_jit_div(jg, num, vb2); if (div_tmp < 0) goto jit_fail;
+                        contrib = pg_jit_neg(jg, div_tmp); if (contrib < 0) goto jit_fail;
+                    }
+                    break;
+                }
+                case PG_AG_OP_NEG: { contrib = pg_jit_neg(jg, g_child); if (contrib < 0) goto jit_fail; break; }
+                case PG_AG_OP_EXP: {
+                    if (val_a < 0) { ag_set_err("exp val missing"); goto jit_fail; }
+                    int exp_a = pg_jit_exp(jg, val_a); if (exp_a < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, exp_a); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_LOG: {
+                    if (val_a < 0) goto jit_fail;
+                    contrib = pg_jit_div(jg, g_child, val_a); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_SQRT: {
+                    if (val_a < 0) goto jit_fail;
+                    int sqrt_a = pg_jit_sqrt(jg, val_a); if (sqrt_a < 0) goto jit_fail;
+                    int half = pg_jit_add_const(jg, 0.5f); if (half < 0) goto jit_fail;
+                    int inv = pg_jit_div(jg, half, sqrt_a); if (inv < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, inv); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_SIN: {
+                    if (val_a < 0) goto jit_fail;
+                    int cos_a = pg_jit_cos(jg, val_a); if (cos_a < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, cos_a); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_COS: {
+                    if (val_a < 0) goto jit_fail;
+                    int sin_a = pg_jit_sin(jg, val_a); if (sin_a < 0) goto jit_fail;
+                    int neg_sin = pg_jit_neg(jg, sin_a); if (neg_sin < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, neg_sin); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_RELU: {
+                    if (val_a < 0) goto jit_fail;
+                    int step = pg_jit_step(jg, val_a); if (step < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, step); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_SIGMOID: {
+                    if (val_a < 0) goto jit_fail;
+                    int s = pg_jit_sigmoid(jg, val_a); if (s < 0) goto jit_fail;
+                    int one = pg_jit_add_const(jg, 1.0f); if (one < 0) goto jit_fail;
+                    int one_minus_s = pg_jit_sub(jg, one, s); if (one_minus_s < 0) goto jit_fail;
+                    int local = pg_jit_mul(jg, s, one_minus_s); if (local < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, local); if (contrib < 0) goto jit_fail; break;
+                }
+                case PG_AG_OP_TANH: {
+                    if (val_a < 0) goto jit_fail;
+                    int t = pg_jit_tanh(jg, val_a); if (t < 0) goto jit_fail;
+                    int t2 = pg_jit_mul(jg, t, t); if (t2 < 0) goto jit_fail;
+                    int one = pg_jit_add_const(jg, 1.0f); if (one < 0) goto jit_fail;
+                    int local = pg_jit_sub(jg, one, t2); if (local < 0) goto jit_fail;
+                    contrib = pg_jit_mul(jg, g_child, local); if (contrib < 0) goto jit_fail; break;
+                }
+                default: { ag_set_err("unhandled op %d", n->ag_op); goto jit_fail; }
+            }
+            if (contrib < 0) { ag_set_err("contrib fail"); goto jit_fail; }
+            // p_idx may be in suffix or not. If in suffix, its grad is internal; if not, it's output.
+            // For output case, we still store in grad_jit_id for that parent index to allow accumulation if multiple suffix children contribute to same parent.
+            if (grad_jit_id[p_idx] < 0) {
+                grad_jit_id[p_idx] = contrib;
+            } else {
+                int added = pg_jit_add(jg, grad_jit_id[p_idx], contrib);
+                if (added < 0) { ag_set_err("add accum fail"); goto jit_fail; }
+                grad_jit_id[p_idx] = added;
+            }
+        }
+    }
+    #undef GET_VAL_JIT
+
+    int leaf_out_ids[16];
+    pg_node *leaf_nodes[16];
+    bool leaf_is_bcast[16] = {0};
+    pg_tensor *leaf_tmp[16] = {0};
+    size_t n_leaf = 0;
+    for (size_t i = 0; i < order->n; i++) if(is_suffix_output[i]) {
+        int gid = grad_jit_id[i];
+        if (gid < 0) continue;
+        if (n_leaf >= 16) { ag_set_err("too many leaf outs"); goto jit_fail; }
+        pg_node *ln = order->items[i];
+        if (!is_bcast_compat(ln->value->ndim, ln->value->shape, loop_ndim, loop_shape)) {
+            ag_set_err("leaf output shape not bcast compat");
+            goto jit_fail;
+        }
+        bool is_bcast = !pg_shape_equal(ln->value->ndim, ln->value->shape, loop_ndim, loop_shape);
+        leaf_is_bcast[n_leaf] = is_bcast;
+        leaf_out_ids[n_leaf] = gid;
+        leaf_nodes[n_leaf] = ln;
+        n_leaf++;
+    }
+    if (n_leaf == 0) { ag_set_err("no leaf grads to output"); goto jit_fail; }
+    for (size_t i = 0; i < n_leaf; i++) pg_jit_mark_output(jg, leaf_out_ids[i]);
+
+    pg_jit_exe *exe = pg_jit_compile(jg);
+    if (!exe) { ag_set_err("compile fail %s", pg_jit_last_error()); goto jit_fail; }
+
+    /* prepare run: zero grads for suffix outputs (and also for all? we will zero all grads in pg_backward before, but for suffix we need to ensure) */
+    for (size_t i = 0; i < order->n; i++) {
+        pg_node *n = order->items[i];
+        if (is_suffix_output[i]) {
+            ensure_grad(n);
+            if (!n->grad) { ag_set_err("ensure grad fail"); pg_jit_exe_free(exe); goto jit_fail; }
+            // zero will be done by pg_backward before, but ensure zero
+        }
+    }
+
+    g_eff_tensor = pg_tensor_full(loop_ndim, loop_shape, red_scale);
+    if (!g_eff_tensor) { ag_set_err("g_eff tensor alloc fail"); goto jit_fail; }
+    const pg_tensor *jit_inputs[16];
+    pg_tensor *jit_outputs[16];
+    // g_eff is first input (index 0), val_maps inputs follow
+    jit_inputs[0] = g_eff_tensor;
+    for (size_t i = 0; i < n_val_maps; i++) {
+        jit_inputs[1+i] = val_maps[i].node->value;
+    }
+    for (size_t i = 0; i < n_leaf; i++) {
+        if (leaf_is_bcast[i]) {
+            pg_tensor *tmp = pg_tensor_zeros(loop_ndim, loop_shape);
+            if (!tmp) { ag_set_err("tmp alloc fail"); pg_jit_exe_free(exe); goto jit_fail; }
+            leaf_tmp[i] = tmp;
+            jit_outputs[i] = tmp;
+        } else {
+            jit_outputs[i] = leaf_nodes[i]->grad;
+        }
+    }
+
+    bool ok = pg_jit_run(exe, jit_inputs, n_val_maps+1, jit_outputs, n_leaf);
+    pg_tensor_free(g_eff_tensor);
+    if (ok) {
+        for (size_t i=0;i<n_leaf;i++) if(leaf_is_bcast[i]) {
+            accum(leaf_nodes[i], leaf_tmp[i], 1.0f);
+            pg_tensor_free(leaf_tmp[i]);
+        }
+    } else {
+        for (size_t i=0;i<n_leaf;i++) if(leaf_tmp[i]) pg_tensor_free(leaf_tmp[i]);
+    }
+    pg_jit_exe_free(exe);
+    pg_jit_graph_free(jg);
+    free(val_maps);
+    free(grad_jit_id);
+    // if require_full, ensure all non-prefix elementwise nodes were in suffix
+    if (require_full) {
+        for (size_t i=0;i<order->n;i++) {
+            bool is_prefix = false;
+            for (size_t pp=0; pp<n_prefix; pp++) if (prefix_nodes[pp]==order->items[i]) {is_prefix=true; break;}
+            if (is_prefix) continue;
+            pg_node *nn = order->items[i];
+            if (nn->ag_op==PG_AG_OP_NONE) continue;
+            if (!in_suffix[i]) { ag_set_err("not all nodes in suffix for full"); free(in_suffix); free(is_suffix_output); return false; }
+        }
+        free(in_suffix);
+        free(is_suffix_output);
+    } else {
+        free(in_suffix);
+        free(is_suffix_output);
+    }
+    if (!ok) { ag_set_err("jit run fail %s", pg_jit_last_error()); return false; }
+    return true;
+
+jit_fail:
+    pg_jit_graph_free(jg);
+    free(val_maps);
+    free(grad_jit_id);
+    free(in_suffix);
+    free(is_suffix_output);
+    if (g_eff_tensor) pg_tensor_free(g_eff_tensor);
+    return false;
+}
+
+
+
+static bool try_jit_suffix(pg_node *loss, node_vec *order, bool **out_handled) {
+    // Use the internal suffix JIT (require_full=false) and if it succeeds, compute in_suffix for caller
+    bool ok = try_jit_backward_internal_ex(loss, order, false);
+    if (!ok) return false;
+    // Recompute in_suffix for hybrid handling (same logic as inside try_jit)
+    pg_node *eff_loss = loss;
+    pg_node *prefix_nodes[32]; size_t n_prefix=0;
+    while (eff_loss && (eff_loss->ag_op == PG_AG_OP_SUM || eff_loss->ag_op == PG_AG_OP_MEAN)) {
+        if (n_prefix>=32) return true; // suffix was handled, but we can't compute in_suffix precisely, return without handled
+        prefix_nodes[n_prefix++] = eff_loss;
+        if (eff_loss->nparents==0) break;
+        eff_loss = eff_loss->parents[0];
+    }
+    if (!eff_loss || eff_loss->ag_op==PG_AG_OP_NONE || !ag_op_is_jit_elementwise(eff_loss->ag_op)) {
+        // suffix was empty? Still return true but no handled
+        *out_handled = calloc(order->n, sizeof(bool));
+        return true;
+    }
+    size_t loop_ndim = eff_loss->value->ndim;
+    size_t loop_shape[PG_MAX_NDIM]; memcpy(loop_shape, eff_loss->value->shape, loop_ndim*sizeof(size_t));
+    size_t loop_numel = eff_loss->value->numel;
+    bool *in_suffix = calloc(order->n, sizeof(bool));
+    int *queue = malloc(order->n * sizeof(int));
+    if (!in_suffix || !queue) { free(in_suffix); free(queue); *out_handled = calloc(order->n,sizeof(bool)); return true; }
+    int eff_idx = find_order_idx(order, eff_loss);
+    if (eff_idx>=0) {
+        size_t qh=0, qt=0;
+        queue[qt++]=eff_idx; in_suffix[eff_idx]=true;
+        while(qh<qt){
+            int idx2 = queue[qh++];
+            pg_node *n = order->items[idx2];
+            for(size_t pi=0; pi<n->nparents; pi++){
+                pg_node *par = n->parents[pi];
+                int p_idx = find_order_idx(order, par);
+                if(p_idx<0) continue;
+                if(in_suffix[p_idx]) continue;
+                pg_node *pn = order->items[p_idx];
+                if(pn->ag_op==PG_AG_OP_NONE) continue;
+                if(!ag_op_is_jit_elementwise(pn->ag_op)) continue;
+                if(pn->value->ndim != loop_ndim || pn->value->numel != loop_numel || !pg_shape_equal(pn->value->ndim, pn->value->shape, loop_ndim, loop_shape)) continue;
+                in_suffix[p_idx]=true;
+                queue[qt++]=p_idx;
+            }
+        }
+    }
+    free(queue);
+    *out_handled = in_suffix;
+    return true;
+}
+
+bool pg_backward_jit(pg_node *loss) {
+    if (!loss || !loss->requires_grad) return false;
+    node_vec order = {0};
+    topo_sort(loss, &order);
+    bool ok = try_jit_backward_internal(loss, &order);
+    for (size_t i = 0; i < order.n; i++) order.items[i]->mark = 0;
+    free(order.items);
+    return ok;
+}
+
 void pg_backward(pg_node *loss)
 {
     if (!loss || !loss->requires_grad)
         return;
-
     node_vec order = {0};
     topo_sort(loss, &order);
 
@@ -950,13 +1951,39 @@ void pg_backward(pg_node *loss)
         if (order.items[i]->grad)
             pg_tensor_fill(order.items[i]->grad, 0.0f);
 
-    ensure_grad(loss);
-    pg_tensor_fill(loss->grad, 1.0f);
-
-    for (size_t i = order.n; i-- > 0;) {
-        pg_node *n = order.items[i];
-        if (n->backward && n->grad)
-            n->backward(n);
+    bool *in_suffix = NULL;
+    bool did_jit = false;
+    if (g_ag_jit_enabled) {
+        if (try_jit_suffix(loss, &order, &in_suffix)) {
+            did_jit = true;
+            g_ag_last_was_jit = true;
+            g_ag_jit_hits++;
+        }
+    }
+    if (did_jit) {
+        // suffix JIT succeeded, handle remaining nodes eagerly
+        for (size_t i = order.n; i-- > 0;) {
+            pg_node *n = order.items[i];
+            size_t idx = 0;
+            for (size_t k=0;k<order.n;k++) if(order.items[k]==n) {idx=k; break;}
+            if (in_suffix && in_suffix[idx]) continue;
+            if (n->backward && n->grad)
+                n->backward(n);
+        }
+        free(in_suffix);
+    } else {
+        if (g_ag_jit_enabled) {
+            g_ag_last_was_jit = false;
+            g_ag_jit_fallbacks++;
+        }
+        if (in_suffix) free(in_suffix);
+        ensure_grad(loss);
+        pg_tensor_fill(loss->grad, 1.0f);
+        for (size_t i = order.n; i-- > 0;) {
+            pg_node *n = order.items[i];
+            if (n->backward && n->grad)
+                n->backward(n);
+        }
     }
 
     for (size_t i = 0; i < order.n; i++)

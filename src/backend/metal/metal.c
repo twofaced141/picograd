@@ -19,7 +19,6 @@ static id<MTLCommandQueue> g_queue;
 static id<MTLComputePipelineState> g_p_sgemm;
 static id<MTLComputePipelineState> g_p_map;
 static id<MTLComputePipelineState> g_p_bin;
-static id<MTLComputePipelineState> g_p_accum_gather;
 static id<MTLComputePipelineState> g_p_accum_scatter;
 static id<MTLComputePipelineState> g_p_sum_axis;
 static id<MTLComputePipelineState> g_p_softmax;
@@ -104,27 +103,6 @@ static const char *msl_source(void)
     "    default: r = va; break;\n"
     "    }\n"
     "    out[tid] = r;\n"
-    "}\n"
-    "\n"
-    "/* ---- accumulate gather ---- */\n"
-    "kernel void pg_k_accum_gather(\n"
-    "    device float *dst [[buffer(0)]],\n"
-    "    device const float *src [[buffer(1)]],\n"
-    "    constant float &scale [[buffer(2)]],\n"
-    "    constant Strides &ar [[buffer(3)]],\n"
-    "    uint tid [[thread_position_in_grid]])\n"
-    "{\n"
-    "    if (tid >= ar.numel) return;\n"
-    "    u32 idx[8];\n"
-    "    u32 rem = tid;\n"
-    "    for (u32 d = ar.ndim; d-- > 0;) {\n"
-    "        idx[d] = rem % ar.shape[d];\n"
-    "        rem /= ar.shape[d];\n"
-    "    }\n"
-    "    u32 os = 0;\n"
-    "    for (u32 d = 0; d < ar.ndim; d++)\n"
-    "        os += idx[d] * ar.s[d];\n"
-    "    dst[tid] += scale * src[os];\n"
     "}\n"
     "\n"
     "/* ---- accumulate scatter ---- */\n"
@@ -326,7 +304,6 @@ static pg_status metal_compile_library(void)
         LOAD(pg_k_sgemm,        g_p_sgemm);
         LOAD(pg_k_map,           g_p_map);
         LOAD(pg_k_bin,           g_p_bin);
-        LOAD(pg_k_accum_gather,  g_p_accum_gather);
         LOAD(pg_k_accum_scatter, g_p_accum_scatter);
         LOAD(pg_k_sum_axis,      g_p_sum_axis);
         LOAD(pg_k_softmax,       g_p_softmax);
@@ -495,18 +472,6 @@ static pg_status metal_gpu_bin(float *out, const float *a, const float *b,
     });
 }
 
-static pg_status metal_gpu_accum_gather(float *dst, const float *src,
-                                         float scale, const pg_k_strides *args)
-{
-    if (metal_init() != PG_OK) return PG_ERR_GEMM;
-    return metal_dispatch_1d(g_p_accum_gather, args->numel, 4, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)dst  offset:0 atIndex:0];
-        [enc setBuffer:(void *)src  offset:0 atIndex:1];
-        [enc setBytes:&scale length:sizeof(scale) atIndex:2];
-        [enc setBytes:(void *)args length:sizeof(*args) atIndex:3];
-    });
-}
-
 static pg_status metal_gpu_accum_scatter(float *dst, const float *src,
                                           float scale, const pg_k_strides *args)
 {
@@ -578,7 +543,6 @@ static void metal_register_gpu(void)
 {
     pg_gpu.map          = metal_gpu_map;
     pg_gpu.bin          = metal_gpu_bin;
-    pg_gpu.accum_gather  = metal_gpu_accum_gather;
     pg_gpu.accum_scatter = metal_gpu_accum_scatter;
     pg_gpu.sum_axis     = metal_gpu_sum_axis;
     pg_gpu.softmax      = metal_gpu_softmax;

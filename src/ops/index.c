@@ -70,6 +70,35 @@ pg_tensor *pg_scatter(const pg_tensor *t, size_t axis, const pg_tensor *indices,
     return out;
 }
 
+pg_tensor *pg_embedding(const pg_tensor *weight, const pg_tensor *indices)
+{
+    assert(weight && indices && weight->data && indices->data);
+    assert(weight->ndim == 2);
+    size_t V = weight->shape[0], E = weight->shape[1];
+
+    for (size_t i = 0; i < indices->numel; i++) {
+        float v = indices->data[i];
+        if (!(v >= 0.0f && v < (float)V && v == floorf(v)))
+            return NULL;
+    }
+
+    size_t shape[PG_MAX_NDIM];
+    assert(indices->ndim + 1 <= PG_MAX_NDIM);
+    memcpy(shape, indices->shape, indices->ndim * sizeof(size_t));
+    shape[indices->ndim] = E;
+    size_t ndim = indices->ndim + 1;
+
+    pg_tensor *out = pg_tensor_empty(ndim, shape);
+    if (!out)
+        return NULL;
+
+    for (size_t i = 0; i < indices->numel; i++) {
+        size_t row = (size_t)indices->data[i];
+        memcpy(out->data + i * E, weight->data + row * E, E * sizeof(float));
+    }
+    return out;
+}
+
 pg_tensor *pg_index_select(const pg_tensor *t, size_t axis, const pg_tensor *indices)
 {
     assert(t && indices && t->data && indices->data);

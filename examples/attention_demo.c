@@ -8,12 +8,6 @@
 #include "../src/ops/norm.h"
 #include "../src/autograd/autograd.h"
 
-static int argmax_row(const float *p, size_t n){
-    int best=0; float bv=p[0];
-    for(size_t i=1;i<n;i++) if(p[i]>bv){bv=p[i]; best=(int)i;}
-    return best;
-}
-
 int main(void){
     printf("=== attention demo: scaled dot-product + layernorm ===\n");
     pg_seed(42);
@@ -90,18 +84,11 @@ int main(void){
         pg_node *wq = pg_var_uniform(2,(size_t[]){DIM,DIM}, -0.5f,0.5f,true);
         pg_node *wk = pg_var_uniform(2,(size_t[]){DIM,DIM}, -0.5f,0.5f,true);
         pg_node *wv = pg_var_uniform(2,(size_t[]){DIM,DIM}, -0.5f,0.5f,true);
-        // target = layernorm(X) (just to have something)
+        // target = layernorm(X)
         pg_tensor *targ_t = pg_layernorm(X, ln_w, ln_b, 1e-5f);
         pg_node *target = pg_var_from_tensor(targ_t, false);
 
-        // forward with autograd ops (using matmul + layernorm + etc manually via autograd helpers)
-        // we reuse plain tensor logic but wrap via autograd nodes for the linear projections.
-        // For K^T we need transpose trick: since autograd matmul does not have transpose flag,
-        // we do it manually via permute not tracked. So we demonstrate a simplified attention
-        // where we do QK^T via eager transpose inside autograd? For demo we just show that
-        //layernorm and matmul have grads.
-
-        // simpler: y = layernorm( relu( X @ Wq ) )
+        // simplified: y = layernorm( relu( X @ Wq ) )
         pg_node *q = pg_ag_matmul(xn, wq);
         pg_node *qr = pg_ag_relu(q); pg_node_free(q);
         // layernorm requires weight/bias nodes
@@ -131,7 +118,7 @@ int main(void){
     // cleanup
     pg_tensor_free(X); pg_tensor_free(Wq); pg_tensor_free(Wk); pg_tensor_free(Wv);
     pg_tensor_free(Q); pg_tensor_free(K); pg_tensor_free(V);
-    pg_tensor_free(Kt); // view free
+    pg_tensor_free(Kt);
     pg_tensor_free(scores); pg_tensor_free(attn); pg_tensor_free(Out);
     pg_tensor_free(resid); pg_tensor_free(ln_w); pg_tensor_free(ln_b); pg_tensor_free(normed);
 

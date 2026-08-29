@@ -108,8 +108,6 @@ int main(void){
     pg_tensor *pb = pg_tensor_uniform(1,(size_t[]){8},-1,1);
     const pg_tensor *insb[2]={pa,pb};
     pg_tensor *jb = pg_jit_run_single(exeb, insb, 2);
-    pg_tensor *eb = pg_relu(pg_add(pa,pb));
-    // need to handle tmp free
     pg_tensor *tmp = pg_add(pa,pb);
     pg_tensor *eb2 = pg_relu(tmp);
     printf("broadcast verification: %s\n", pg_tensor_allclose(jb, eb2,1e-5,1e-5)?"PASS":"FAIL");
@@ -117,7 +115,7 @@ int main(void){
     /* cleanup */
     pg_tensor_free(ta); pg_tensor_free(tb); pg_tensor_free(tc);
     pg_tensor_free(e0); pg_tensor_free(e1); pg_tensor_free(e2); pg_tensor_free(eager); pg_tensor_free(jout);
-    pg_tensor_free(pa); pg_tensor_free(pb); pg_tensor_free(jb); pg_tensor_free(tmp); pg_tensor_free(eb2); pg_tensor_free(eb);
+    pg_tensor_free(pa); pg_tensor_free(pb); pg_tensor_free(jb); pg_tensor_free(tmp); pg_tensor_free(eb2);
     pg_jit_exe_free(exe); pg_jit_exe_free(exeb);
     pg_jit_graph_free(g); pg_jit_graph_free(gb);
     pg_jit_cache_clear();

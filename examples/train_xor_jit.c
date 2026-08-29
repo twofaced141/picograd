@@ -11,8 +11,11 @@
 
 /*
  * XOR training with JIT-accelerated elementwise part.
- * Demonstrates how (add + tanh) is fused into a single kernel.
- * MatMul stays via pg_gemm (AVX2-optimized), bias+activation is JIT.
+ * Demonstrates how (add + tanh) is fused into a single kernel for inference,
+ * and how the backward pass (autograd) is now JIT-compiled for elementwise
+ * chains (e.g., mse loss: sub -> mul -> mean) via pg_autograd_set_jit(true).
+ * MatMul stays via pg_gemm (AVX2-optimized), bias+activation is JIT for inference.
+ * Training uses eager forward but JIT backward for the loss.
  */
 
 #define EPOCHS 3000
@@ -55,24 +58,12 @@ static void jit_free(void){
     pg_jit_cache_clear();
 }
 
-/* JIT-accelerated forward: matmul stays eager, add+act is JIT */
+/* Forward for training: matmul stays eager, add+act is eager but backward is JIT.
+   Inference path (infer_jit) uses JIT kernels directly on tensors. */
 static pg_node *forward_jit(pg_node *x, pg_node *w1, pg_node *b1, pg_node *w2, pg_node *b2){
     pg_node *mm1 = pg_ag_matmul(x, w1); // [4,8]
-    // JIT: mm1 + b1 -> tanh
-    pg_tensor *mm1_t = pg_node_value(mm1);
-    pg_tensor *b1_t = pg_node_value(b1);
-    const pg_tensor *ins1[2]={mm1_t, b1_t};
-    pg_tensor *h_t = pg_jit_run_single(g_jit.add_tanh, ins1, 2);
-    // wrap into pg_node for autograd (no JIT autograd, do it manually via eager ops for gradients)
-    // Simple path: use eager pg_add+pg_tanh for the graph, but for speed demo compare inference.
-    // Here for training we keep the eager graph so backward is correct.
-    // Therefore for training forward_jit is not really used; the demo shows inference speedup.
-    pg_tensor_free(h_t);
+    pg_node *z1 = pg_ag_add(mm1,b1);
     pg_node_free(mm1);
-    // fallback to eager for correct grad
-    pg_node *mm1e = pg_ag_matmul(x,w1);
-    pg_node *z1 = pg_ag_add(mm1e,b1);
-    pg_node_free(mm1e);
     pg_node *h = pg_ag_tanh(z1);
     pg_node_free(z1);
     pg_node *mm2 = pg_ag_matmul(h,w2);
@@ -126,13 +117,14 @@ int main(void){
     pg_sgd *opt=pg_sgd_new(&cfg);
     pg_sgd_add_param(opt,w1); pg_sgd_add_param(opt,b1); pg_sgd_add_param(opt,w2); pg_sgd_add_param(opt,b2);
 
-    // training with plain eager (so gradients are correct)
+    // training with JIT autograd (pg_backward uses JIT for elementwise chains like mse)
+    pg_autograd_set_jit(true);
     for(int it=0;it<EPOCHS;it++){
         pg_node *out=forward_jit(x,w1,b1,w2,b2);
         pg_node *loss=mse_loss(out,y);
         pg_node_free(out);
         pg_backward(loss);
-        if(it%PRINT_EVERY==0||it==EPOCHS-1) printf("iter %5d loss %.6f (cache %zu)\n", it, pg_node_value(loss)->data[0], pg_jit_cache_size());
+        if(it%PRINT_EVERY==0||it==EPOCHS-1) printf("iter %5d loss %.6f (cache %zu, jit_hits %zu fall %zu %s)\n", it, pg_node_value(loss)->data[0], pg_jit_cache_size(), pg_autograd_jit_hits(), pg_autograd_jit_fallbacks(), pg_autograd_last_was_jit()?"jit":"eager");
         pg_sgd_step(opt);
         pg_node_free(loss);
     }
@@ -164,6 +156,66 @@ int main(void){
     clock_gettime(CLOCK_MONOTONIC,&ts1);
     double jit_ms=(ts1.tv_sec-ts0.tv_sec)*1e3 + (ts1.tv_nsec-ts0.tv_nsec)/1e6;
     printf("eager %.1f ms  jit %.1f ms  speedup %.2fx\n", eager_ms, jit_ms, eager_ms/jit_ms);
+
+    // autograd benchmark: pure elementwise chain (fused backward)
+    printf("\n--- autograd benchmark (elementwise 10000 runs, [64,64] (a+b)*c -> relu -> tanh -> sum) ---\n");
+    {
+        pg_tensor *ta = pg_tensor_uniform(2,(size_t[]){64,64}, -1,1);
+        pg_tensor *tb = pg_tensor_uniform(2,(size_t[]){64,64}, -1,1);
+        pg_tensor *tc = pg_tensor_uniform(2,(size_t[]){64,64}, -1,1);
+        // eager
+        pg_autograd_set_jit(false);
+        pg_jit_cache_clear();
+        clock_gettime(CLOCK_MONOTONIC,&ts0);
+        for(int i=0;i<10000;i++){
+            pg_node *pa = pg_var_from_tensor(ta, true);
+            pg_node *pb = pg_var_from_tensor(tb, true);
+            pg_node *pc = pg_var_from_tensor(tc, true);
+            pg_node *t0 = pg_ag_add(pa, pb);
+            pg_node *t1 = pg_ag_mul(t0, pc); pg_node_free(t0);
+            pg_node *t2 = pg_ag_relu(t1); pg_node_free(t1);
+            pg_node *t3 = pg_ag_tanh(t2); pg_node_free(t2);
+            pg_node *loss = pg_ag_sum_all(t3); pg_node_free(t3);
+            pg_backward(loss);
+            pg_node_free(loss); pg_node_free(pa); pg_node_free(pb); pg_node_free(pc);
+        }
+        clock_gettime(CLOCK_MONOTONIC,&ts1);
+        double eager_bwd = (ts1.tv_sec-ts0.tv_sec)*1e3 + (ts1.tv_nsec-ts0.tv_nsec)/1e6;
+        // jit
+        pg_autograd_set_jit(true);
+        pg_jit_cache_clear();
+        // warmup (compile)
+        {
+            pg_node *pa = pg_var_from_tensor(ta, true);
+            pg_node *pb = pg_var_from_tensor(tb, true);
+            pg_node *pc = pg_var_from_tensor(tc, true);
+            pg_node *t0 = pg_ag_add(pa, pb);
+            pg_node *t1 = pg_ag_mul(t0, pc); pg_node_free(t0);
+            pg_node *t2 = pg_ag_relu(t1); pg_node_free(t1);
+            pg_node *t3 = pg_ag_tanh(t2); pg_node_free(t2);
+            pg_node *loss = pg_ag_sum_all(t3); pg_node_free(t3);
+            pg_backward(loss);
+            pg_node_free(loss); pg_node_free(pa); pg_node_free(pb); pg_node_free(pc);
+        }
+        clock_gettime(CLOCK_MONOTONIC,&ts0);
+        for(int i=0;i<10000;i++){
+            pg_node *pa = pg_var_from_tensor(ta, true);
+            pg_node *pb = pg_var_from_tensor(tb, true);
+            pg_node *pc = pg_var_from_tensor(tc, true);
+            pg_node *t0 = pg_ag_add(pa, pb);
+            pg_node *t1 = pg_ag_mul(t0, pc); pg_node_free(t0);
+            pg_node *t2 = pg_ag_relu(t1); pg_node_free(t1);
+            pg_node *t3 = pg_ag_tanh(t2); pg_node_free(t2);
+            pg_node *loss = pg_ag_sum_all(t3); pg_node_free(t3);
+            pg_backward(loss);
+            pg_node_free(loss); pg_node_free(pa); pg_node_free(pb); pg_node_free(pc);
+        }
+        clock_gettime(CLOCK_MONOTONIC,&ts1);
+        double jit_bwd = (ts1.tv_sec-ts0.tv_sec)*1e3 + (ts1.tv_nsec-ts0.tv_nsec)/1e6;
+        printf("eager bwd %.1f ms  jit bwd %.1f ms  speedup %.2fx (cache %zu)\n", eager_bwd, jit_bwd, eager_bwd/jit_bwd, pg_jit_cache_size());
+        pg_tensor_free(ta); pg_tensor_free(tb); pg_tensor_free(tc);
+        pg_autograd_set_jit(true);
+    }
 
     // final predictions via jit
     printf("\n predictions (jit):\n");

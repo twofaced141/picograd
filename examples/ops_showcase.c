@@ -17,8 +17,6 @@ static void print_hdr(const char *s){
 int main(void){
     pg_seed(0);
     printf("=== picograd ops showcase ===\n");
-    printf("Demonstrates: tensor creation, views, elementwise (broadcast), matmul family,\n");
-    printf(" activations, reductions, norm, indexing, scan, and a tiny JIT fusion.\n");
 
     // 1. creation
     print_hdr("1. tensor creation");

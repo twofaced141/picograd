@@ -45,7 +45,7 @@ int main(void){
     if(!x||!y||!w1||!b1||!w2||!b2) return 1;
 
     // Xavier-like scale for tanh
-    // already uniform +-1 is fine, but we divide a bit for stability
+    // divide a bit for stability
     for(size_t i=0;i<w1->value->numel;i++) w1->value->data[i] *= 0.5f;
     for(size_t i=0;i<w2->value->numel;i++) w2->value->data[i] *= 0.5f;
 

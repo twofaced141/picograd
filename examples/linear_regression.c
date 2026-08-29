@@ -49,9 +49,7 @@ int main(void){
         pg_node_free(pred);
         pg_node *sq = pg_ag_mul(diff, diff);
         pg_node_free(diff);
-        // NOTE: pg_ag_mean_all is flawed for [N,1] (returns sum, not mean)
-        // so we use mean over axis 0 which correctly divides by N
-        pg_node *loss = pg_ag_mean(sq, 0, false); // [1]  mean over N
+        pg_node *loss = pg_ag_mean(sq, 0, false); // mean over N
         pg_node_free(sq);
 
         pg_backward(loss);
