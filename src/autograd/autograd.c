@@ -848,11 +848,10 @@ static void bwd_transpose(pg_node *n)
         return;
     pg_tensor *g = n->grad;
     size_t ndim = g->ndim;
-    size_t shape[PG_MAX_NDIM], stride[PG_MAX_NDIM];
+    size_t shape[PG_MAX_NDIM];
     for (size_t i = 0; i < ndim; i++) {
         size_t axis = (i == cx->axis0) ? cx->axis1 : (i == cx->axis1 ? cx->axis0 : i);
         shape[i] = g->shape[axis];
-        stride[i] = g->stride[axis];
     }
     pg_tensor *gt = pg_tensor_empty(ndim, shape);
     if (!gt) return;
@@ -1574,14 +1573,17 @@ static void topo_sort(pg_node *root, node_vec *order)
     size_t sp = 0, cap = 0;
 
     root->mark = 1;
-    do {
+    {
+        size_t ncap = cap ? cap * 2 : 32;
         if (sp == cap) {
-            size_t ncap = cap ? cap * 2 : 32;
-            frame *ns = realloc(stk, ncap * sizeof(*ns));
+            frame *ns = malloc(ncap * sizeof(*ns));
             if (!ns) {
                 assert(ns);
-                free(stk);
                 return;
+            }
+            if (stk) {
+                memcpy(ns, stk, sp * sizeof(*ns));
+                free(stk);
             }
             stk = ns;
             cap = ncap;
@@ -1589,7 +1591,7 @@ static void topo_sort(pg_node *root, node_vec *order)
         stk[sp].n = root;
         stk[sp].i = 0;
         sp++;
-    } while (0);
+    }
 
     while (sp) {
         frame *f = &stk[sp - 1];
@@ -1599,11 +1601,13 @@ static void topo_sort(pg_node *root, node_vec *order)
                 c->mark = 1;
                 if (sp == cap) {
                     size_t ncap = cap ? cap * 2 : 32;
-                    frame *ns = realloc(stk, ncap * sizeof(*ns));
+                    frame *ns = malloc(ncap * sizeof(*ns));
                     if (!ns) {
                         assert(ns);
                         break;
                     }
+                    memcpy(ns, stk, sp * sizeof(*ns));
+                    free(stk);
                     stk = ns;
                     cap = ncap;
                 }
@@ -1667,7 +1671,7 @@ static bool is_bcast_compat(size_t ndim_a, const size_t *shape_a, size_t ndim_b,
 
 static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool require_full);
 
-static bool try_jit_backward_internal_full(pg_node *loss, node_vec *order) {
+static __attribute__((unused)) bool try_jit_backward_internal_full(pg_node *loss, node_vec *order) {
     return try_jit_backward_internal_ex(loss, order, true);
 }
 static bool try_jit_backward_internal(pg_node *loss, node_vec *order) {
@@ -2052,11 +2056,11 @@ static bool try_jit_suffix(pg_node *loss, node_vec *order, bool **out_handled) {
     if (!ok) return false;
     // Recompute in_suffix for hybrid handling (same logic as inside try_jit)
     pg_node *eff_loss = loss;
-    pg_node *prefix_nodes[32]; size_t n_prefix=0;
+    size_t n_prefix = 0;
     while (eff_loss && (eff_loss->ag_op == PG_AG_OP_SUM || eff_loss->ag_op == PG_AG_OP_MEAN)) {
-        if (n_prefix>=32) return true; // suffix was handled, but we can't compute in_suffix precisely, return without handled
-        prefix_nodes[n_prefix++] = eff_loss;
-        if (eff_loss->nparents==0) break;
+        if (n_prefix >= 32) return true; // suffix was handled, but we can't compute in_suffix precisely, return without handled
+        n_prefix++;
+        if (eff_loss->nparents == 0) break;
         eff_loss = eff_loss->parents[0];
     }
     if (!eff_loss || eff_loss->ag_op==PG_AG_OP_NONE || !ag_op_is_jit_elementwise(eff_loss->ag_op)) {

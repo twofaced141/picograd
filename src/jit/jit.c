@@ -656,8 +656,8 @@ pg_jit_exe *pg_jit_compile(pg_jit_graph *g){
                 pg_jit_exe *exe = exe_new();
                 if (!exe) { set_err("oom"); return NULL; }
                 exe->hash = h;
-                strncpy(exe->c_path, e->c_path, sizeof(exe->c_path)-1);
-                strncpy(exe->so_path, e->so_path, sizeof(exe->so_path)-1);
+                snprintf(exe->c_path, sizeof(exe->c_path), "%s", e->c_path);
+                snprintf(exe->so_path, sizeof(exe->so_path), "%s", e->so_path);
                 exe->ninputs = e->ninputs;
                 exe->noutputs = e->noutputs;
                 for (size_t i=0;i<e->ninputs;i++){ exe->in_ndim[i]=e->in_ndim[i]; memcpy(exe->in_shape[i], e->in_shape[i], e->in_ndim[i]*sizeof(size_t)); }
@@ -713,8 +713,8 @@ pg_jit_exe *pg_jit_compile(pg_jit_graph *g){
     if (!exe){ dlclose(hdl); unlink(c_path); unlink(so_path); set_err("oom"); return NULL; }
     exe->handle = hdl;
     exe->kernel = kern;
-    strncpy(exe->c_path, c_path, sizeof(exe->c_path)-1);
-    strncpy(exe->so_path, so_path, sizeof(exe->so_path)-1);
+    snprintf(exe->c_path, sizeof(exe->c_path), "%s", c_path);
+    snprintf(exe->so_path, sizeof(exe->so_path), "%s", so_path);
     exe->hash = h;
     exe->ninputs = g->ninputs;
     exe->noutputs = g->noutputs;
@@ -737,8 +737,8 @@ pg_jit_exe *pg_jit_compile(pg_jit_graph *g){
         cache_entry_t *ce = calloc(1,sizeof(*ce));
         if (ce){
             ce->hash = h;
-            strncpy(ce->c_path, c_path, sizeof(ce->c_path)-1);
-            strncpy(ce->so_path, so_path, sizeof(ce->so_path)-1);
+            snprintf(ce->c_path, sizeof(ce->c_path), "%s", c_path);
+            snprintf(ce->so_path, sizeof(ce->so_path), "%s", so_path);
             ce->ninputs = exe->ninputs;
             ce->noutputs = exe->noutputs;
             for (size_t i=0;i<exe->ninputs;i++){ ce->in_ndim[i]=exe->in_ndim[i]; memcpy(ce->in_shape[i], exe->in_shape[i], exe->in_ndim[i]*sizeof(size_t)); }
