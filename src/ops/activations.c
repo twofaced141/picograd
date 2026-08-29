@@ -227,7 +227,7 @@ static pg_tensor *softmax_impl(const pg_tensor *t, size_t axis, bool log)
         if (use_heap) {
             max_buf = malloc(inner * sizeof(float));
             sum_buf = malloc(inner * sizeof(float));
-            if (!max_buf || !sum_buf) { free(max_buf); free(sum_buf); goto fallback; }
+            if (!max_buf || !sum_buf) goto fallback;
         } else {
             max_buf = max_stack;
             sum_buf = sum_stack;
