@@ -1,6 +1,8 @@
 # picograd
 
-A tiny tensor library in C11 with reverse-mode autograd and SGD, running on the CPU.
+[![CI](https://github.com/twofaced141/picograd/actions/workflows/ci.yml/badge.svg)](https://github.com/twofaced141/picograd/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A tiny tensor library in C11 with reverse-mode autograd and SGD — CPU by default with optional GPU backends (CUDA, HIP/ROCm, Metal) via `dlopen` at runtime.
 
 ## Features
 
