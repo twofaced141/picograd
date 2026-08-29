@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.cc }}, ${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        backend: [cpu]
+        include:
+          - cc: gcc
+            cxx: g++
+          - cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          ${CC} --version
+          ${CXX} --version || true
+          make --version
+          ld --version | head -n1
+
+      - name: Build (BACKEND=${{ matrix.backend }})
+        run: make -j$(nproc) BACKEND=${{ matrix.backend }}
+
+      - name: Build examples
+        run: make examples BACKEND=${{ matrix.backend }} -j$(nproc)
+
+      - name: Run tests
+        run: make test BACKEND=${{ matrix.backend }}
+
+  backends:
+    name: backends compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: cc --version
+
+      - name: Build BACKEND=cuda
+        run: |
+          make clean
+          make -j$(nproc) BACKEND=cuda
+          make test BACKEND=cuda
+
+      - name: Build BACKEND=hip
+        run: |
+          make clean
+          make -j$(nproc) BACKEND=hip
+          make test BACKEND=hip
+
+      - name: Build BACKEND=metal (stub on Linux)
+        run: |
+          make clean
+          make -j$(nproc) BACKEND=metal
+          make test BACKEND=metal
+
+      # rocm is alias for hip
+      - name: Build BACKEND=rocm (alias)
+        run: |
+          make clean
+          make -j$(nproc) BACKEND=rocm
+          make test BACKEND=rocm
+
+  sanitize:
+    name: sanitizers (gcc asan+ubsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + test with ASan/UBSan
+        env:
+          CC: gcc
+          CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+          LDFLAGS: "-fsanitize=address,undefined"
+        run: |
+          make clean
+          make -j$(nproc)
+          make test
