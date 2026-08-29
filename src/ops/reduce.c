@@ -115,7 +115,6 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
     // Fast path: inner == 1 => contiguous reduction along last axis (most common)
     if (inner == 1) {
         if (outer >= 32 && outer * len >= 32768) {
-            // parallel over outer
             if (f == f_sum) {
                 reduce_sum1_par_t ctx={t->data, out->data, outer, len};
                 pg_parallel_for(outer, 32, reduce_sum1_par_fn, &ctx);
@@ -139,7 +138,6 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
 
     // Cache-friendly blocked version for inner > 1 (e.g., axis=0 column sum)
     if (inner > 1) {
-        // initialize out
         for (size_t i = 0; i < out->numel; i++) out->data[i] = init;
         if (f == f_sum) {
             if (outer >= 8 && outer * inner * len >= 16384) {

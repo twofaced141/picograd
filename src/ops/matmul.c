@@ -53,7 +53,7 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
 {
     if (pg_get_device() == PG_DEV_CPU)
         return NULL;
-    /* quick checks for device_limits */
+    /* overflow guard before device copy */
     if (a->numel > UINT_MAX || b->numel > UINT_MAX)
         return NULL;
 

@@ -445,7 +445,6 @@ pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_
     v->ndim = ndim;
     memcpy(v->shape, shape, ndim*sizeof(size_t));
     compute_strides(ndim, shape, v->stride);
-    // numel unchanged
     return v;
 }
 pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order) {
@@ -460,7 +459,6 @@ pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order) {
     for(size_t i=0;i<src->ndim;i++){ nshape[i]=src->shape[order[i]]; nstride[i]=src->stride[order[i]]; }
     memcpy(v->shape, nshape, src->ndim*sizeof(size_t));
     memcpy(v->stride, nstride, src->ndim*sizeof(size_t));
-    // ndim unchanged, numel unchanged
     return v;
 }
 

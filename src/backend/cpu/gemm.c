@@ -259,7 +259,6 @@ void pg_cpu_gemm_fused(size_t m, size_t n, size_t k,
     size_t total=m*n*k;
     int nthreads=pg_thread_pool_size();
     if(nthreads<=1 || total < (1<<18) || m < 16){
-        // serial fused
         for(size_t i=0;i<m;i+=PG_MR){
             size_t mi=m - i < PG_MR ? m - i : PG_MR;
             if(bias){ for(size_t ii=0;ii<mi;ii++){ float*crow=c+(i+ii)*ldc; for(size_t j=0;j<n;j++) crow[j]=bias[j]; } }
