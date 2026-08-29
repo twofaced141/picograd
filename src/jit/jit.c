@@ -675,6 +675,7 @@ pg_jit_exe *pg_jit_compile(pg_jit_graph *g){
     // compile
     if (compile_c_to_so(c_path, so_path)!=0){
         set_err("compile failed for %s (see %s)", so_path, c_path);
+        unlink(c_path);
         return NULL;
     }
 

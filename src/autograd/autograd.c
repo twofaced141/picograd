@@ -1304,7 +1304,7 @@ pg_node *pg_ag_cross_entropy(pg_node *logits, const size_t *targets, size_t n, b
     pg_tensor *v = pg_tensor_full(1, (size_t[]){1}, loss);
     if (!v)
         return NULL;
-    ce_ctx *cx = malloc(sizeof(*cx));
+    ce_ctx *cx = malloc(sizeof(*cx) + n * sizeof(size_t));
     if (!cx) {
         pg_tensor_free(v);
         return NULL;
@@ -1312,17 +1312,11 @@ pg_node *pg_ag_cross_entropy(pg_node *logits, const size_t *targets, size_t n, b
     cx->rows = rows;
     cx->cls = cls;
     cx->mean = mean;
-    cx->targets = malloc(n * sizeof(size_t));
-    if (!cx->targets) {
-        free(cx);
-        pg_tensor_free(v);
-        return NULL;
-    }
+    cx->targets = (size_t *)((char *)cx + sizeof(*cx));
     memcpy(cx->targets, targets, n * sizeof(size_t));
 
     pg_node *r = attach(v, 1, &logits, bwd_cross_entropy, cx, PG_AG_OP_CROSS_ENTROPY);
     if (!r) {
-        free(cx->targets);
         free(cx);
     }
     return r;
@@ -1387,24 +1381,18 @@ pg_node *pg_ag_bce_with_logits(pg_node *logits, const float *targets, size_t n, 
     pg_tensor *v = pg_tensor_full(1, (size_t[]){1}, loss);
     if (!v)
         return NULL;
-    bce_ctx *cx = malloc(sizeof(*cx));
+    bce_ctx *cx = malloc(sizeof(*cx) + n * sizeof(float));
     if (!cx) {
         pg_tensor_free(v);
         return NULL;
     }
     cx->n = n;
     cx->mean = mean;
-    cx->targets = malloc(n * sizeof(float));
-    if (!cx->targets) {
-        free(cx);
-        pg_tensor_free(v);
-        return NULL;
-    }
+    cx->targets = (float *)((char *)cx + sizeof(*cx));
     memcpy(cx->targets, targets, n * sizeof(float));
 
     pg_node *r = attach(v, 1, &logits, bwd_bce, cx, PG_AG_OP_BCE);
     if (!r) {
-        free(cx->targets);
         free(cx);
     }
     return r;
@@ -1669,6 +1657,7 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
     for (size_t i = 0; i < order->n; i++) grad_jit_id[i] = -1;
 
     pg_tensor *g_eff_tensor = NULL;
+    pg_tensor *leaf_tmp[16] = {0};
     int g_eff = pg_jit_add_input(jg, loop_ndim, loop_shape);
     if (g_eff < 0) { ag_set_err("g_eff input fail %s", pg_jit_last_error()); goto jit_fail; }
     grad_jit_id[eff_idx] = g_eff;
@@ -1814,7 +1803,6 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
     int leaf_out_ids[16];
     pg_node *leaf_nodes[16];
     bool leaf_is_bcast[16] = {0};
-    pg_tensor *leaf_tmp[16] = {0};
     size_t n_leaf = 0;
     for (size_t i = 0; i < order->n; i++) if(is_suffix_output[i]) {
         int gid = grad_jit_id[i];
@@ -1907,6 +1895,7 @@ jit_fail:
     free(in_suffix);
     free(is_suffix_output);
     if (g_eff_tensor) pg_tensor_free(g_eff_tensor);
+    for (size_t _lt = 0; _lt < 16; _lt++) if (leaf_tmp[_lt]) pg_tensor_free(leaf_tmp[_lt]);
     return false;
 }
 

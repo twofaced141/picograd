@@ -8,6 +8,8 @@
 #include <stdlib.h>
 
 #include "../src/autograd/autograd.h"
+#include "../src/core/tensor.h"
+#include "../src/jit/jit.h"
 #include "../src/nn/module.h"
 #include "../src/opt/adam.h"
 #include "../src/opt/lr_sched.h"
@@ -64,8 +66,14 @@ int main(void)
         float lr = pg_lr_sched_step(sched);
         pg_adam_set_lr(opt, lr);
 
-        pg_node *h = pg_ag_relu(pg_ag_add(pg_ag_matmul(xn, W1), b1));
-        pg_node *logits = pg_ag_add(pg_ag_matmul(h, W2), b2);
+        pg_node *mm1 = pg_ag_matmul(xn, W1);
+        pg_node *a1 = pg_ag_add(mm1, b1);
+        pg_node_free(mm1);
+        pg_node *h = pg_ag_relu(a1);
+        pg_node_free(a1);
+        pg_node *mm2 = pg_ag_matmul(h, W2);
+        pg_node *logits = pg_ag_add(mm2, b2);
+        pg_node_free(mm2);
         pg_node *loss = pg_ag_cross_entropy(logits, y, N, true);
 
         pg_adam_zero_grad(opt);
@@ -78,15 +86,23 @@ int main(void)
             last = lv;
 
         pg_adam_step(opt);
-        pg_node_free(loss); // cascades free of h, logits, ...
+        pg_node_free(loss);
+        pg_node_free(logits);
+        pg_node_free(h);
 
         if (it % 400 == 0 || it == ITERS - 1)
             printf("iter %4zu  lr %.4f  loss %.4f\n", it, lr, lv);
     }
 
     // final accuracy
-    pg_node *h = pg_ag_relu(pg_ag_add(pg_ag_matmul(xn, W1), b1));
-    pg_node *logits = pg_ag_add(pg_ag_matmul(h, W2), b2);
+    pg_node *mm1 = pg_ag_matmul(xn, W1);
+    pg_node *a1 = pg_ag_add(mm1, b1);
+    pg_node_free(mm1);
+    pg_node *h = pg_ag_relu(a1);
+    pg_node_free(a1);
+    pg_node *mm2 = pg_ag_matmul(h, W2);
+    pg_node *logits = pg_ag_add(mm2, b2);
+    pg_node_free(mm2);
     size_t correct = 0;
     for (size_t i = 0; i < N; i++) {
         size_t off = i * CLS;
@@ -107,8 +123,14 @@ int main(void)
     pg_node_free(logits);
     pg_node_free(h);
     pg_node_free(xn);
-    pg_module_free(m); // frees W1,b1,W2,b2
+    pg_module_free(m);
     pg_adam_free(opt);
+    pg_node_free(W1);
+    pg_node_free(b1);
+    pg_node_free(W2);
+    pg_node_free(b2);
     pg_lr_sched_free(sched);
+    pg_tensor_pool_clear();
+    pg_jit_cache_clear();
     return 0;
 }

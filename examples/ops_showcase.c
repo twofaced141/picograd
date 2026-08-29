@@ -87,10 +87,14 @@ int main(void){
         printf("a + b (broadcast [2,3]+[3]):\n"); pg_tensor_print(s,stdout);
 
         pg_tensor *col = pg_tensor_from_data(2,(size_t[]){2,1}, (float[]){100,200});
-        pg_tensor *pr = pg_mul(col, pg_tensor_from_data(2,(size_t[]){1,3}, (float[]){1,2,3}));
+        pg_tensor *row_tmp = pg_tensor_from_data(2,(size_t[]){1,3}, (float[]){1,2,3});
+        pg_tensor *pr = pg_mul(col, row_tmp);
+        pg_tensor_free(row_tmp);
         printf("col [2,1] * row [1,3] -> [2,3]:\n"); pg_tensor_print(pr,stdout);
 
-        pg_tensor *e = pg_exp(pg_tensor_zeros(1,(size_t[]){1}));
+        pg_tensor *tmp_e_in = pg_tensor_zeros(1,(size_t[]){1});
+        pg_tensor *e = pg_exp(tmp_e_in);
+        pg_tensor_free(tmp_e_in);
         printf("exp(0)=%g\n", e->data[0]);
 
         float pi6=3.14159265f/6.0f;
@@ -98,7 +102,9 @@ int main(void){
         pg_tensor *sn = pg_sin(ang), *cs = pg_cos(ang);
         printf("sin(pi/6)=%g cos=%g\n", sn->data[0], cs->data[0]);
 
-        pg_tensor *sq = pg_sqrt(pg_tensor_full(1,(size_t[]){4}, 4.0f));
+        pg_tensor *tmp_sq_in = pg_tensor_full(1,(size_t[]){4}, 4.0f);
+        pg_tensor *sq = pg_sqrt(tmp_sq_in);
+        pg_tensor_free(tmp_sq_in);
         printf("sqrt([4,4,4,4])="); pg_tensor_print(sq,stdout);
 
         pg_tensor *cl = pg_clamp(a, 2.0f, 4.5f);

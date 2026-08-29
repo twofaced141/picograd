@@ -142,7 +142,13 @@ void pg_adam_step(pg_adam *opt){
             opt->states[i].m=pg_tensor_zeros(p->value->ndim, p->value->shape);
             opt->states[i].v=pg_tensor_zeros(p->value->ndim, p->value->shape);
             if(amsgrad) opt->states[i].vmax=pg_tensor_zeros(p->value->ndim, p->value->shape);
-            if(!opt->states[i].m || !opt->states[i].v) { assert(0); continue; }
+            if(!opt->states[i].m || !opt->states[i].v || (amsgrad && !opt->states[i].vmax)) {
+                pg_tensor_free(opt->states[i].m); opt->states[i].m=NULL;
+                pg_tensor_free(opt->states[i].v); opt->states[i].v=NULL;
+                pg_tensor_free(opt->states[i].vmax); opt->states[i].vmax=NULL;
+                assert(0);
+                continue;
+            }
         }
         float *m=opt->states[i].m->data;
         float *v=opt->states[i].v->data;

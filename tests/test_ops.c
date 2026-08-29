@@ -130,7 +130,9 @@ static void test_elementwise(void)
     CHECK(pw);
     CHECKF(pw, 0, 1); CHECKF(pw, 3, 16); CHECKF(pw, 5, 36);
 
-    pg_tensor *ex = pg_exp(pg_tensor_zeros(1, (size_t[]){1}));
+    pg_tensor *tmp_ex_in = pg_tensor_zeros(1, (size_t[]){1});
+    pg_tensor *ex = pg_exp(tmp_ex_in);
+    pg_tensor_free(tmp_ex_in);
     CHECK(ex && ex->data[0] == 1.0f);
     pg_tensor *one = pg_tensor_ones(1, (size_t[]){1});
     pg_tensor *lg = pg_log(one);
@@ -147,10 +149,18 @@ static void test_elementwise(void)
     pg_tensor *ef = pg_erf(onef);
     CHECK(ef && closef(ef->data[3], erff(1.0f)));
 
-    pg_tensor *sc = pg_add(b, pg_tensor_ones(1, (size_t[]){3}));
+    pg_tensor *tmp_sc_in = pg_tensor_ones(1, (size_t[]){3});
+    pg_tensor *sc = pg_add(b, tmp_sc_in);
+    pg_tensor_free(tmp_sc_in);
     CHECK(sc && sc->data[2] == 31.0f);
 
-    CHECK(pg_add(a, pg_tensor_ones(1, (size_t[]){4})) == NULL);
+    {
+        pg_tensor *tmp_bad = pg_tensor_ones(1, (size_t[]){4});
+        pg_tensor *bad_res = pg_add(a, tmp_bad);
+        CHECK(bad_res == NULL);
+        pg_tensor_free(bad_res);
+        pg_tensor_free(tmp_bad);
+    }
 
     pg_tensor_free(a); pg_tensor_free(b); pg_tensor_free(s); pg_tensor_free(col);
     pg_tensor_free(row); pg_tensor_free(pr); pg_tensor_free(d); pg_tensor_free(twos);
@@ -261,12 +271,16 @@ static void test_index(void)
     float raw[6] = {10, 20, 30, 40, 50, 60};
     pg_tensor *t = pg_tensor_from_data(2, (size_t[]){2, 3}, raw);
 
-    pg_tensor *sel = pg_index_select(t, 0, pg_tensor_from_data(1, (size_t[]){2}, (float[]){1, 0}));
+    pg_tensor *sel_idx = pg_tensor_from_data(1, (size_t[]){2}, (float[]){1, 0});
+    pg_tensor *sel = pg_index_select(t, 0, sel_idx);
+    pg_tensor_free(sel_idx);
     CHECK(sel && eq_shape(sel, 2, (size_t[]){2, 3}));
     CHECKF(sel, 0, 40); CHECKF(sel, 1, 50); CHECKF(sel, 2, 60);
     CHECKF(sel, 3, 10); CHECKF(sel, 4, 20); CHECKF(sel, 5, 30);
 
-    pg_tensor *cols = pg_index_select(t, 1, pg_tensor_from_data(1, (size_t[]){2}, (float[]){2, 0}));
+    pg_tensor *cols_idx = pg_tensor_from_data(1, (size_t[]){2}, (float[]){2, 0});
+    pg_tensor *cols = pg_index_select(t, 1, cols_idx);
+    pg_tensor_free(cols_idx);
     CHECK(cols && eq_shape(cols, 2, (size_t[]){2, 2}));
     CHECKF(cols, 0, 30); CHECKF(cols, 1, 10); CHECKF(cols, 2, 60); CHECKF(cols, 3, 40);
 
@@ -289,8 +303,11 @@ static void test_index(void)
     CHECK(ms && ms->numel == 3);
     CHECKF(ms, 0, 10); CHECKF(ms, 1, 40); CHECKF(ms, 2, 50);
 
-    pg_tensor *bad = pg_gather(t, 1, pg_tensor_from_data(2, (size_t[]){1, 1}, (float[]){3}));
+    pg_tensor *bad_idx = pg_tensor_from_data(2, (size_t[]){1, 1}, (float[]){3});
+    pg_tensor *bad = pg_gather(t, 1, bad_idx);
+    pg_tensor_free(bad_idx);
     CHECK(bad == NULL);
+    pg_tensor_free(bad);
 
     pg_tensor_free(t); pg_tensor_free(sel); pg_tensor_free(cols); pg_tensor_free(gi);
     pg_tensor_free(g); pg_tensor_free(sv); pg_tensor_free(sc); pg_tensor_free(mask);
@@ -360,7 +377,11 @@ static void test_matmul(void)
 
     pg_tensor *c = pg_matmul(a, b);
     CHECK(c && eq_shape(c, 2, (size_t[]){3, 5}));
-    CHECK(pg_tensor_allclose(c, pg_tensor_from_data(2, (size_t[]){3, 5}, ref), 1e-4f, 1e-4f));
+    {
+        pg_tensor *ref_t = pg_tensor_from_data(2, (size_t[]){3, 5}, ref);
+        CHECK(pg_tensor_allclose(c, ref_t, 1e-4f, 1e-4f));
+        pg_tensor_free(ref_t);
+    }
 
     size_t M = 13, K = 7, N = 9;
     pg_tensor *ta = pg_tensor_uniform(2, (size_t[]){M, K}, -1, 1);
@@ -368,7 +389,11 @@ static void test_matmul(void)
     float tref[13 * 9];
     ref_gemm(M, N, K, ta->data, tb->data, tref);
     pg_tensor *tc = pg_matmul(ta, tb);
-    CHECK(tc && pg_tensor_allclose(tc, pg_tensor_from_data(2, (size_t[]){M, N}, tref), 1e-4f, 1e-4f));
+    {
+        pg_tensor *tref_t = pg_tensor_from_data(2, (size_t[]){M, N}, tref);
+        CHECK(tc && pg_tensor_allclose(tc, tref_t, 1e-4f, 1e-4f));
+        pg_tensor_free(tref_t);
+    }
 
     pg_tensor *v = pg_tensor_uniform(1, (size_t[]){4}, -1, 1);
     pg_tensor *vv = pg_matmul(v, v);

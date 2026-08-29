@@ -289,8 +289,10 @@ static void test_dropout_layer(void)
     pg_tensor *x = pg_tensor_from_data(1, (size_t[]){4}, d);
     pg_tensor *y = pg_dropout_layer_forward(l, x, true);
     CHECK(y && y->numel == 4);
-    pg_node *yn = pg_ag_dropout_layer_forward(pg_var_from_tensor(x, true), 0.3f, true);
+    pg_node *tmp_xn = pg_var_from_tensor(x, true);
+    pg_node *yn = pg_ag_dropout_layer_forward(tmp_xn, 0.3f, true);
     CHECK(yn && yn->value);
+    pg_node_free(tmp_xn);
     pg_node_free(yn); pg_tensor_free(y); pg_tensor_free(x);
     pg_dropout_layer_free(l);
 }

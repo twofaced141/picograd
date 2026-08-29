@@ -263,7 +263,9 @@ static void test_module_and_groups(void)
     CHECK(dy > dx); // y (lr 0.1) moved more than x (lr 0.01)
 
     pg_adam_free(opt);
-    pg_module_free(m); // also frees x,y
+    pg_module_free(m);
+    pg_node_free(x);
+    pg_node_free(y);
 }
 
 int main(void)
