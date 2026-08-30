@@ -1,10 +1,15 @@
 #include "pool.h"
 #include <pthread.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#if defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#else
+#include <unistd.h>
+#endif
 
 typedef struct pg_task {
     pg_parallel_fn fn;
@@ -39,10 +44,22 @@ static int g_init_done = 0;
 static int g_pool_inited = 0;
 
 int pg_hardware_concurrency(void) {
+#if defined(__APPLE__)
+    int ncpu = 0;
+    size_t len = sizeof(ncpu);
+    if (sysctlbyname("hw.ncpu", &ncpu, &len, NULL, 0) == 0 && ncpu > 0) {
+        if (ncpu > 64) ncpu = 64;
+        return ncpu;
+    }
+    return 4;
+#elif defined(_SC_NPROCESSORS_ONLN)
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 1;
     if (n > 64) n = 64;
     return (int)n;
+#else
+    return 4;
+#endif
 }
 
 static void *worker_fn(void *arg) {
