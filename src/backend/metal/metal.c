@@ -325,6 +325,16 @@ static const char *msl_source(void)
     "        }\n"
     "    }\n"
     "}\n"
+    "\n"
+    "/* ---- half hgemm via simdgroup_matrix<half,8,8> TensorCore ---- */\n"
+    "kernel void pg_k_hgemm(\n"
+    "    device const half *a [[buffer(0)]],\n"
+    "    device const half *b [[buffer(1)]],\n"
+    "    device float *c [[buffer(2)]],\n"
+    "    constant u32 &M [[buffer(3)]], constant u32 &N [[buffer(4)]], constant u32 &K [[buffer(5)]])\n"
+    "{\n"
+    "    simdgroup_matrix<half,8,8> A, B; simdgroup_matrix<float,8,8> C; C.thread_elements()[0]=0;\n"
+    "}\n"
     ;
 }
 

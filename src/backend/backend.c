@@ -1,10 +1,26 @@
 #include "backend_i.h"
 
 #include "cpu/gemm.h"
+#include "../core/dtype.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+// forward cpu mixed-precision
+void pg_cpu_gemm_ex(pg_dtype dtype, size_t m, size_t n, size_t k,
+                    const void *a, size_t lda,
+                    const void *b, size_t ldb,
+                    float *c, size_t ldc);
+void pg_cpu_hgemm(size_t m, size_t n, size_t k,
+                  const uint16_t *a, size_t lda,
+                  const uint16_t *b, size_t ldb,
+                  float *c, size_t ldc);
+void pg_cpu_bgemm(size_t m, size_t n, size_t k,
+                  const uint16_t *a, size_t lda,
+                  const uint16_t *b, size_t ldb,
+                  float *c, size_t ldc);
 
 static void *cpu_malloc(size_t nbytes)
 {
@@ -26,6 +42,9 @@ const pg_backend_ops pg_backend_cpu = {
     .copy_d2h = cpu_copy,
     .sync = NULL,
     .gemm = NULL,
+    .hgemm = NULL,
+    .bgemm = NULL,
+    .gemm_ex = NULL,
 };
 
 static pg_devtype g_device = PG_DEV_CPU;
@@ -126,6 +145,44 @@ void pg_gemm(size_t m, size_t n, size_t k,
     }
 
     pg_cpu_gemm(m, n, k, a, lda, b, ldb, c, ldc);
+}
+
+void pg_gemm_ex(pg_dtype dtype,
+                size_t m, size_t n, size_t k,
+                const void *a, size_t lda,
+                const void *b, size_t ldb,
+                float *c, size_t ldc)
+{
+    const pg_backend_ops *o = ops_for(g_device);
+    assert(o);
+    if (dtype == PG_DTYPE_F32) {
+        // lda/ldc are in elements, a/b are float*
+        if (o->gemm) { o->gemm(m,n,k,(const float*)a,lda,(const float*)b,ldb,c,ldc); return; }
+        pg_cpu_gemm(m,n,k,(const float*)a,lda,(const float*)b,ldb,c,ldc);
+        return;
+    }
+    if (o->gemm_ex) {
+        if (o->gemm_ex(dtype,m,n,k,a,lda,b,ldb,c,ldc)==PG_OK) return;
+    }
+    if (dtype==PG_DTYPE_F16 && o->hgemm) { o->hgemm(m,n,k,(const uint16_t*)a,lda,(const uint16_t*)b,ldb,c,ldc); return; }
+    if (dtype==PG_DTYPE_BF16 && o->bgemm) { o->bgemm(m,n,k,(const uint16_t*)a,lda,(const uint16_t*)b,ldb,c,ldc); return; }
+    // fallback to cpu mixed-precision
+    pg_cpu_gemm_ex(dtype,m,n,k,a,lda,b,ldb,c,ldc);
+}
+
+void pg_hgemm(size_t m, size_t n, size_t k,
+              const uint16_t *a, size_t lda,
+              const uint16_t *b, size_t ldb,
+              float *c, size_t ldc)
+{
+    pg_gemm_ex(PG_DTYPE_F16, m,n,k,a,lda,b,ldb,c,ldc);
+}
+void pg_bgemm(size_t m, size_t n, size_t k,
+              const uint16_t *a, size_t lda,
+              const uint16_t *b, size_t ldb,
+              float *c, size_t ldc)
+{
+    pg_gemm_ex(PG_DTYPE_BF16, m,n,k,a,lda,b,ldb,c,ldc);
 }
 
 pg_status pg_op_map(float *out, const float *src, size_t n, int op)

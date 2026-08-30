@@ -2,6 +2,7 @@
 
 #include "../backend/backend.h"
 #include "../backend/cpu/gemm.h"
+#include "../core/convert.h"
 #include "../ops/activations.h"
 #include "../ops/conv.h"
 #include "../ops/elementwise.h"
@@ -527,7 +528,33 @@ static void bwd_tanh(pg_node *n)  { bwd_unary_elemwise(n, grad_tanh); }
 static void bwd_matmul(pg_node *n)
 {
     pg_node *pa = n->parents[0], *pb = n->parents[1];
-    const pg_tensor *a = pa->value, *b = pb->value, *g = n->grad;
+    const pg_tensor *a_orig = pa->value, *b_orig = pb->value;
+    const pg_tensor *g = n->grad;
+    // handle mixed-precision: convert half inputs to f32 temporaries for gradient GEMM (f32 accum)
+    pg_tensor *a_conv = NULL, *b_conv = NULL;
+    const pg_tensor *a = a_orig, *b = b_orig;
+    if (a_orig->dtype != PG_DTYPE_F32) {
+        a_conv = pg_tensor_empty_dtype(PG_DTYPE_F32, a_orig->ndim, a_orig->shape);
+        if (!a_conv) return;
+        for (size_t i=0;i<a_orig->numel;i++) {
+            float v;
+            if (a_orig->dtype==PG_DTYPE_F16) v = pg_f16_to_f32_scalar(a_orig->data_u16[i]);
+            else v = pg_bf16_to_f32_scalar(a_orig->data_u16[i]);
+            a_conv->data[i]=v;
+        }
+        a = a_conv;
+    }
+    if (b_orig->dtype != PG_DTYPE_F32) {
+        b_conv = pg_tensor_empty_dtype(PG_DTYPE_F32, b_orig->ndim, b_orig->shape);
+        if (!b_conv) { pg_tensor_free(a_conv); return; }
+        for (size_t i=0;i<b_orig->numel;i++) {
+            float v;
+            if (b_orig->dtype==PG_DTYPE_F16) v = pg_f16_to_f32_scalar(b_orig->data_u16[i]);
+            else v = pg_bf16_to_f32_scalar(b_orig->data_u16[i]);
+            b_conv->data[i]=v;
+        }
+        b = b_conv;
+    }
 
     bool av = a->ndim == 1, bv = b->ndim == 1;
     size_t am = av ? 1 : a->shape[a->ndim - 2];
@@ -549,8 +576,10 @@ static void bwd_matmul(pg_node *n)
     size_t step_b = bbat ? ak * bn : 0;
     size_t step_g = am * bn;
 
-    if (!pa->requires_grad && !pb->requires_grad)
+    if (!pa->requires_grad && !pb->requires_grad) {
+        pg_tensor_free(a_conv); pg_tensor_free(b_conv);
         return;
+    }
     if (av && bv) {
         if (pa->requires_grad) {
             ensure_grad(pa);
@@ -562,6 +591,7 @@ static void bwd_matmul(pg_node *n)
             for (size_t i = 0; i < ak; i++)
                 pb->grad->data[i] += g->data[0] * a->data[i];
         }
+        pg_tensor_free(a_conv); pg_tensor_free(b_conv);
         return;
     }
 
@@ -639,6 +669,7 @@ static void bwd_matmul(pg_node *n)
     }
     free(tmp_trans);
     free(tmp_out);
+    pg_tensor_free(a_conv); pg_tensor_free(b_conv);
 }
 
 static void bwd_reduce(pg_node *n, float scale)

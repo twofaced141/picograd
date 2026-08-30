@@ -22,6 +22,10 @@ ifeq ($(ARCH),x86_64)
 CFLAGS   += -mavx2
 ASFLAGS  += -mavx2 -mavx512f
 CPPFLAGS += -DPG_ARCH_X86_64
+# per-file advanced ISA flags for mixed-precision microkernels (do not add globally to avoid illegal insn on older CPUs)
+build/src/backend/cpu/hgemm_avx512fp16.o: CFLAGS += -mavx512fp16
+build/src/backend/cpu/bgemm_avx512bf16.o: CFLAGS += -mavx512bf16
+build/src/backend/cpu/amx_bf16.o: CFLAGS += -mamx-tile -mamx-bf16 -mavx512bf16
 else ifeq ($(ARCH),aarch64)
 ASFLAGS :=
 CPPFLAGS += -DPG_ARCH_AARCH64

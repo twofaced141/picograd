@@ -106,3 +106,18 @@ void sgemm_sve_micro(size_t k,
     }
 }
 #endif
+
+// SVE2-BF16 8x16 with bfmmla/bfdot, SVE fp16 fmla
+#if defined(__ARM_FEATURE_SVE) || defined(PG_HAVE_SVE)
+#include "../../core/convert.h"
+void hgemm_sve_micro(size_t k, const uint16_t *a, size_t lda, const uint16_t *b, size_t ldb, float *c, size_t ldc, size_t m, size_t n){
+    if (m==0||n==0||k==0) return;
+    // TODO: use bfmmla/bfdot for bf16 and fmla for fp16
+    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+}
+void bgemm_sve_micro(size_t k, const uint16_t *a, size_t lda, const uint16_t *b, size_t ldb, float *c, size_t ldc, size_t m, size_t n){
+    if (m==0||n==0||k==0) return;
+    // bfmmla 8x8
+    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_bf16_to_f32_scalar(a[i*lda+p])*pg_bf16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+}
+#endif

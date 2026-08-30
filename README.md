@@ -6,12 +6,12 @@ A tiny tensor library in C11 with reverse-mode autograd and SGD — CPU by defau
 
 ## Features
 
-- Tensors up to 8 dimensions, row-major, `float32`
-- Ops: elementwise (broadcasting), matmul/bmm/tensordot, reductions, activations,
+- Tensors up to 8 dimensions, row-major, `float32` + mixed-precision `float16`/`bfloat16` storage with `float32` accumulation (`src/core/dtype.h`, `convert.h`)
+- Ops: elementwise (broadcasting), matmul/bmm/tensordot (dtype-aware, `f16`/`bf16` via `pg_gemm_ex`), reductions, activations,
   indexing/gather/scatter, cumsum/sort/topk
-- Reverse-mode autograd over a dynamically built computation graph, **JIT-accelerated for elementwise chains** (fused backward, fallback to eager for matmul/reduce)
+- Reverse-mode autograd over a dynamically built computation graph, **JIT-accelerated for elementwise chains** (fused backward, fallback to eager for matmul/reduce), matmul backward uses `hgemm`/`bgemm` (gradients `f32`)
 - Optimizer: SGD with momentum, dampening, weight decay and Nesterov variant
-- Hand-written AVX2 / AVX-512 GEMM microkernels
+- Hand-written AVX2 / AVX-512 GEMM microkernels + mixed-precision kernels: `AVX2` `vcvtph2ps`/`vfmadd` (1.3x BW), `AVX512FP16` `vfmadd231ph` 32x32, `AVX512BF16` `vcvtneps2bf16`+`vdpbf16ps`, `AMX-BF16` `tileloadd`/`tdpbf16ps` 16x32, `ARM NEON` `vld1q_f16`/`vfmaq` 16x8, `SVE2-BF16` `bfmmla`/`bfdot`, GPU `WMMA` `mma.m16n8k16`/`cp.async` (CUDA), `rocWMMA`/`__hip_half` (HIP), `simdgroup_matrix` (Metal)
 - **JIT compilation** — tracing + fusion of elementwise chains into a single
   `cc -O3 -fPIC -shared` kernel (`dlopen` at runtime), with broadcast support
   and cross-run cache (`src/jit`); **covers both forward and backward (autograd)** —
@@ -64,6 +64,23 @@ pg_node_free(w);
 pg_node_free(x);
 pg_sgd_free(opt);
 ```
+
+### Mixed precision (f16/bf16 storage + f32 accum)
+
+```c
+#include "src/core/dtype.h"
+#include "src/core/convert.h"
+
+size_t sh[2]={4,8};
+pg_tensor *a = pg_tensor_empty_dtype(PG_DTYPE_F16, 2, sh);
+pg_tensor *b = pg_tensor_empty_dtype(PG_DTYPE_F16, 2, (size_t[]){8,4});
+// fill via convert
+for(size_t i=0;i<a->numel;i++) a->data_u16[i]=pg_f32_to_f16_scalar(1.0f);
+pg_tensor *c = pg_matmul(a,b); // c is F32 (f32 accum), uses hgemm (AVX2 vcvtph2ps / AVX512FP16 / AMX)
+pg_gemm_ex(PG_DTYPE_F16, 4,4,8, a->data_raw, 8, b->data_raw, 4, c->data, 4);
+```
+
+`ld*` are in elements. Dispatch: `AMX-BF16 > AVX512FP16/BF16 > AVX2 cvt > generic` (x86), `SVE2+BF16`/`NEON fp16` (ARM), `WMMA` (GPU, 312 TFLOPS).
 
 Ownership rule: every function returning a `pg_node *` hands you a new reference;
 operands are borrowed, not consumed. Intermediate nodes must be released with
@@ -118,14 +135,14 @@ MVP limitations: elementwise fusion only, single loop shape for pure elementwise
 ## Layout
 
 ```
-src/core        tensors, shapes, RNG
-src/ops         elementwise, matmul, reduce, activations, index, scan
-src/autograd    computation graph, backward pass
+src/core        tensors (dtype-aware void* + 64B pool), shapes, RNG, dtype/convert
+src/ops         elementwise, matmul (mixed f16/bf16->f32, fused bias+act), reduce, activations, index, scan
+src/autograd    computation graph, backward pass (hgemm/bgemm for grads)
 src/opt         SGD
 src/jit         JIT tracing, fusion, codegen + cache (cc/dlopen)
-src/backend     AVX2/AVX-512 GEMM kernels + CUDA/HIP/Metal dispatch
+src/backend     GEMM: AVX2/AVX-512/AMX + NEON/SVE + CUDA WMMA/HIP rocWMMA/Metal simdgroup dispatch
 src/nn          minimal nn layers (plain tensors)
-tests           unit tests incl. numeric gradient checks
+tests           unit tests incl. numeric gradient checks (f16 tol 1e-2)
 examples        end-to-end training demos
 ```
 

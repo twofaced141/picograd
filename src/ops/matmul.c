@@ -1,6 +1,7 @@
 #include "matmul.h"
 
 #include "../backend/backend.h"
+#include "../core/convert.h"
 #include "common.h"
 #include "elementwise.h"
 #include <assert.h>
@@ -11,28 +12,30 @@
 
 static void scale_(pg_tensor *t, float s)
 {
+    // only for f32 tensors (accum)
+    assert(t->dtype==PG_DTYPE_F32);
     for (size_t i = 0; i < t->numel; i++)
         t->data[i] *= s;
 }
 
 static pg_tensor *permute_copy(const pg_tensor *t, const size_t *order)
 {
-    if (!t || !t->data || !order) return NULL;
+    if (!t || !t->data_raw || !order) return NULL;
     size_t shape[PG_MAX_NDIM];
     for (size_t j = 0; j < t->ndim; j++) {
         if (order[j] >= t->ndim) return NULL;
         shape[j] = t->shape[order[j]];
     }
-    pg_tensor *out = pg_tensor_empty(t->ndim, shape);
-    if (!out)
-        return NULL;
+    pg_tensor *out = pg_tensor_empty_dtype(t->dtype, t->ndim, shape);
+    if (!out) return NULL;
 
     size_t midx[PG_MAX_NDIM] = {0};
+    size_t es = t->elem_size;
     for (size_t p = 0; p < out->numel; p++) {
         size_t src = 0;
         for (size_t d = 0; d < t->ndim; d++)
             src += midx[d] * t->stride[order[d]];
-        out->data[p] = t->data[src];
+        memcpy((char*)out->data_raw + p*es, (char*)t->data_raw + src*es, es);
         pg_odometer_next(midx, out->shape, out->ndim);
     }
     return out;
@@ -54,9 +57,10 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
 {
     if (pg_get_device() == PG_DEV_CPU)
         return NULL;
-    /* overflow guard before device copy */
     if (a->numel > UINT_MAX || b->numel > UINT_MAX)
         return NULL;
+    // only support f32 on gpu for now (future wmma will handle f16)
+    if (a->dtype!=PG_DTYPE_F32 || b->dtype!=PG_DTYPE_F32) return NULL;
 
     size_t ra = a->ndim, rb = b->ndim;
     bool av = ra == 1, bv = rb == 1;
@@ -119,10 +123,9 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
         return NULL;
     }
 
-    /* allocate device buffers for whole tensors */
-    size_t bytes_a = a->numel * sizeof(float);
-    size_t bytes_b = b->numel * sizeof(float);
-    size_t bytes_out = out->numel * sizeof(float);
+    size_t bytes_a = a->numel * a->elem_size;
+    size_t bytes_b = b->numel * b->elem_size;
+    size_t bytes_out = out->numel * out->elem_size;
     pg_dev_buf da = pg_dev_buf_new(bytes_a ? bytes_a : 1);
     pg_dev_buf db = pg_dev_buf_new(bytes_b ? bytes_b : 1);
     pg_dev_buf dc = pg_dev_buf_new(bytes_out ? bytes_out : 1);
@@ -131,8 +134,8 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_h2d(da.ptr, a->data, bytes_a) != PG_OK ||
-        pg_copy_h2d(db.ptr, b->data, bytes_b) != PG_OK) {
+    if (pg_copy_h2d(da.ptr, a->data_raw, bytes_a) != PG_OK ||
+        pg_copy_h2d(db.ptr, b->data_raw, bytes_b) != PG_OK) {
         pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
@@ -151,9 +154,9 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
     size_t ldb_b = bv ? b->stride[rb - 1] : b->stride[rb - 2];
     for (size_t s = 0; s < nbatch; s++) {
         pg_gemm(am, bn, ak,
-                da.ptr + oa, lda_a,
-                db.ptr + ob, ldb_b,
-                dc.ptr + s * am * bn, bn);
+                (float*)da.ptr + oa, lda_a,
+                (float*)db.ptr + ob, ldb_b,
+                (float*)dc.ptr + s * am * bn, bn);
         for (size_t d = bnd; d-- > 0;) {
             midx[d]++;
             oa += sa_bat[d];
@@ -171,7 +174,7 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_d2h(out->data, dc.ptr, bytes_out) != PG_OK) {
+    if (pg_copy_d2h(out->data_raw, dc.ptr, bytes_out) != PG_OK) {
         pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
@@ -182,8 +185,10 @@ static pg_tensor *try_matmul_gpu(const pg_tensor *a, const pg_tensor *b)
 
 pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
 {
-    if (!a || !b || !a->data || !b->data) return NULL;
+    if (!a || !b || !a->data_raw || !b->data_raw) return NULL;
     if (a->ndim < 1 || b->ndim < 1) return NULL;
+    // dtype check: allow both f32, both f16, both bf16. Mixed f16/bf16 not allowed.
+    if (a->dtype != b->dtype) return NULL;
 
     pg_tensor *g = try_matmul_gpu(a, b);
     if (g) return g;
@@ -236,7 +241,8 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
     if (rndim == 0)
         rshape[rndim++] = 1;
 
-    pg_tensor *out = pg_tensor_empty(rndim, rshape);
+    // output always F32 for mixed precision (f32 accum)
+    pg_tensor *out = pg_tensor_empty_dtype(PG_DTYPE_F32, rndim, rshape);
     if (!out)
         return NULL;
 
@@ -251,11 +257,16 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
 
     size_t midx[PG_MAX_NDIM] = {0};
     size_t oa = 0, ob = 0;
+    pg_dtype dt = a->dtype;
     for (size_t s = 0; s < nbatch; s++) {
-        pg_gemm(am, bn, ak,
-                a->data + oa, av ? a->stride[ra - 1] : a->stride[ra - 2],
-                b->data + ob, bv ? b->stride[rb - 1] : b->stride[rb - 2],
-                out->data + s * am * bn, bn);
+        size_t lda_a = av ? a->stride[ra - 1] : a->stride[ra - 2];
+        size_t ldb_b = bv ? b->stride[rb - 1] : b->stride[rb - 2];
+        const void *pa = (char*)a->data_raw + oa * a->elem_size;
+        const void *pb = (char*)b->data_raw + ob * b->elem_size;
+        float *pc = (float*)out->data_raw + s * am * bn;
+        // ld* are in elements (not bytes) per spec
+        if (dt==PG_DTYPE_F32) pg_gemm(am, bn, ak, (const float*)pa, lda_a, (const float*)pb, ldb_b, pc, bn);
+        else pg_gemm_ex(dt, am, bn, ak, pa, lda_a, pb, ldb_b, pc, bn);
         for (size_t d = bnd; d-- > 0;) {
             midx[d]++;
             oa += sa_bat[d];
@@ -274,6 +285,7 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
 {
     if (pg_get_device() == PG_DEV_CPU)
         return NULL;
+    if (a->dtype!=PG_DTYPE_F32 || b->dtype!=PG_DTYPE_F32) return NULL;
     if (a->numel > UINT_MAX || b->numel > UINT_MAX)
         return NULL;
     size_t batch = a->shape[0];
@@ -287,9 +299,9 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
     if (!out) return NULL;
     if (out->numel > UINT_MAX) { pg_tensor_free(out); return NULL; }
 
-    size_t bytes_a = a->numel * sizeof(float);
-    size_t bytes_b = b->numel * sizeof(float);
-    size_t bytes_out = out->numel * sizeof(float);
+    size_t bytes_a = a->numel * a->elem_size;
+    size_t bytes_b = b->numel * b->elem_size;
+    size_t bytes_out = out->numel * out->elem_size;
     pg_dev_buf da = pg_dev_buf_new(bytes_a ? bytes_a : 1);
     pg_dev_buf db = pg_dev_buf_new(bytes_b ? bytes_b : 1);
     pg_dev_buf dc = pg_dev_buf_new(bytes_out ? bytes_out : 1);
@@ -298,23 +310,23 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_h2d(da.ptr, a->data, bytes_a) != PG_OK ||
-        pg_copy_h2d(db.ptr, b->data, bytes_b) != PG_OK) {
+    if (pg_copy_h2d(da.ptr, a->data_raw, bytes_a) != PG_OK ||
+        pg_copy_h2d(db.ptr, b->data_raw, bytes_b) != PG_OK) {
         pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
     for (size_t s = 0; s < batch; s++)
         pg_gemm(m, n, k,
-                da.ptr + s * m * k, k,
-                db.ptr + s * k * n, n,
-                dc.ptr + s * m * n, n);
+                (float*)da.ptr + s * m * k, k,
+                (float*)db.ptr + s * k * n, n,
+                (float*)dc.ptr + s * m * n, n);
     if (pg_dev_sync() != PG_OK) {
         pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
     }
-    if (pg_copy_d2h(out->data, dc.ptr, bytes_out) != PG_OK) {
+    if (pg_copy_d2h(out->data_raw, dc.ptr, bytes_out) != PG_OK) {
         pg_dev_buf_free(&da); pg_dev_buf_free(&db); pg_dev_buf_free(&dc);
         pg_tensor_free(out);
         return NULL;
@@ -325,10 +337,11 @@ static pg_tensor *try_bmm_gpu(const pg_tensor *a, const pg_tensor *b)
 
 pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
 {
-    if (!a || !b || !a->data || !b->data) return NULL;
+    if (!a || !b || !a->data_raw || !b->data_raw) return NULL;
     if (a->ndim != 3 || b->ndim != 3) return NULL;
     if (a->shape[0] != b->shape[0]) return NULL;
     if (a->shape[2] != b->shape[1]) return NULL;
+    if (a->dtype != b->dtype) return NULL;
 
     pg_tensor *g = try_bmm_gpu(a, b);
     if (g) return g;
@@ -339,24 +352,27 @@ pg_tensor *pg_bmm(const pg_tensor *a, const pg_tensor *b)
     size_t n = b->shape[2];
 
     size_t shape[3] = {batch, m, n};
-    pg_tensor *out = pg_tensor_empty(3, shape);
+    pg_tensor *out = pg_tensor_empty_dtype(PG_DTYPE_F32, 3, shape);
     if (!out)
         return NULL;
-
-    for (size_t s = 0; s < batch; s++)
-        pg_gemm(m, n, k,
-                a->data + s * m * k, k,
-                b->data + s * k * n, n,
-                out->data + s * m * n, n);
+    pg_dtype dt=a->dtype;
+    for (size_t s = 0; s < batch; s++) {
+        const void *pa = (char*)a->data_raw + s * m * k * a->elem_size;
+        const void *pb = (char*)b->data_raw + s * k * n * b->elem_size;
+        float *pc = (float*)out->data_raw + s * m * n;
+        if (dt==PG_DTYPE_F32) pg_gemm(m,n,k,(const float*)pa,k,(const float*)pb,n,pc,n);
+        else pg_gemm_ex(dt,m,n,k,pa,k,pb,n,pc,n);
+    }
     return out;
 }
 
 pg_tensor *pg_addmm(const pg_tensor *input, const pg_tensor *m1, const pg_tensor *m2,
                     float alpha, float beta)
 {
-    if (!input || !m1 || !m2 || !input->data || !m1->data || !m2->data) return NULL;
+    if (!input || !m1 || !m2 || !input->data_raw || !m1->data_raw || !m2->data_raw) return NULL;
     if (m1->ndim != 2 || m2->ndim != 2) return NULL;
     if (m1->shape[1] != m2->shape[0]) return NULL;
+    if (m1->dtype != m2->dtype) return NULL;
 
     size_t m = m1->shape[0];
     size_t n = m2->shape[1];
@@ -389,8 +405,9 @@ pg_tensor *pg_addmm(const pg_tensor *input, const pg_tensor *m1, const pg_tensor
 pg_tensor *pg_tensordot(const pg_tensor *a, const pg_tensor *b,
                         size_t ndims, const size_t *axes_a, const size_t *axes_b)
 {
-    if (!a || !b || !a->data || !b->data || !axes_a || !axes_b) return NULL;
+    if (!a || !b || !a->data_raw || !b->data_raw || !axes_a || !axes_b) return NULL;
     if (ndims < 1 || ndims > a->ndim || ndims > b->ndim) return NULL;
+    if (a->dtype != b->dtype) return NULL;
 
     size_t free_a = a->ndim - ndims;
     size_t rest_b = b->ndim - ndims;

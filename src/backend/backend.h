@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include "../core/dtype.h"
 
 /* Forward declaration for GPU exec helper */
 struct pg_tensor;
@@ -117,6 +119,21 @@ void pg_gemm(size_t m, size_t n, size_t k,
              const float *a, size_t lda,
              const float *b, size_t ldb,
              float *c, size_t ldc);
+
+// mixed-precision GEMM: A/B are dtype (F16/BF16 as uint16_t), C is f32 accum
+void pg_gemm_ex(pg_dtype dtype,
+                size_t m, size_t n, size_t k,
+                const void *a, size_t lda,
+                const void *b, size_t ldb,
+                float *c, size_t ldc);
+void pg_hgemm(size_t m, size_t n, size_t k,
+              const uint16_t *a, size_t lda,
+              const uint16_t *b, size_t ldb,
+              float *c, size_t ldc);
+void pg_bgemm(size_t m, size_t n, size_t k,
+              const uint16_t *a, size_t lda,
+              const uint16_t *b, size_t ldb,
+              float *c, size_t ldc);
 
 #ifdef __cplusplus
 }

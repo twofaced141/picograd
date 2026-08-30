@@ -2,6 +2,8 @@
 #define PICOGRAD_BACKEND_I_H
 
 #include "backend.h"
+#include "../core/dtype.h"
+#include <stdint.h>
 
 typedef struct pg_backend_ops {
     const char *name;
@@ -15,6 +17,20 @@ typedef struct pg_backend_ops {
                  const float *a, size_t lda,
                  const float *b, size_t ldb,
                  float *c, size_t ldc);
+    // mixed-precision: A/B stored as f16/bf16 (uint16_t), C always f32 accum
+    void (*hgemm)(size_t m, size_t n, size_t k,
+                  const uint16_t *a, size_t lda,
+                  const uint16_t *b, size_t ldb,
+                  float *c, size_t ldc);
+    void (*bgemm)(size_t m, size_t n, size_t k,
+                  const uint16_t *a, size_t lda,
+                  const uint16_t *b, size_t ldb,
+                  float *c, size_t ldc);
+    pg_status (*gemm_ex)(pg_dtype dtype,
+                         size_t m, size_t n, size_t k,
+                         const void *a, size_t lda,
+                         const void *b, size_t ldb,
+                         float *c, size_t ldc);
 } pg_backend_ops;
 
 extern const pg_backend_ops pg_backend_cpu;

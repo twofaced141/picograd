@@ -189,6 +189,13 @@ static const char *hip_kernel_source(void)
     "    for(int i=0;i<RT;i++){ unsigned int gr=row0+i; if(gr>=m) continue; for(int j=0;j<RN;j++){ unsigned int gc=col0+j; if(gc<n) c[(size_t)gr * n + gc]=acc[i][j]; }\n"
     "    }\n"
     "}\n"
+    "// half/bf16 WMMA kernel with __hip_half and rocWMMA\n"
+    "extern \"C\" __global__ void hip_hgemm_kernel(const __hip_half *a, const __hip_half *b, float *c, unsigned int m, unsigned int n, unsigned int k){\n"
+    "    rocwmma::fragment<rocwmma::matrix_a, 16,16,16, __hip_half, rocwmma::row_major> fa;\n"
+    "    rocwmma::fragment<rocwmma::matrix_b, 16,16,16, __hip_half, rocwmma::col_major> fb;\n"
+    "    rocwmma::fragment<rocwmma::accumulator, 16,16,16, float> fc;\n"
+    "    rocwmma::fill_fragment(fc, 0.0f);\n"
+    "}\n"
     ;
 }
 

@@ -1,4 +1,5 @@
 #include "tensor.h"
+#include "convert.h"
 
 #include "../thread/pool.h"
 #include <assert.h>
@@ -19,7 +20,7 @@ static void fill_par_fn(void *ctx, size_t s, size_t e){ fill_par_t *p=ctx; float
 
 typedef struct pool_entry {
     size_t nbytes;
-    float *ptr;
+    void *ptr;
     struct pool_entry *next;
 } pool_entry_t;
 
@@ -36,7 +37,7 @@ static void *pg_aligned_alloc(size_t nbytes) {
     return p;
 }
 
-static float *pool_acquire(size_t nbytes) {
+static void *pool_acquire(size_t nbytes) {
     pthread_mutex_lock(&g_pool_mu);
     pool_entry_t **pp = &g_pool_head;
     pool_entry_t *cur = g_pool_head;
@@ -51,7 +52,7 @@ static float *pool_acquire(size_t nbytes) {
     }
     if (best) {
         *best_pp = best->next;
-        float *ptr = best->ptr;
+        void *ptr = best->ptr;
         size_t sz = best->nbytes;
         free(best);
         g_pool_count--;
@@ -63,7 +64,7 @@ static float *pool_acquire(size_t nbytes) {
     return NULL;
 }
 
-static void pool_release(float *ptr, size_t nbytes) {
+static void pool_release(void *ptr, size_t nbytes) {
     if (!ptr) return;
     pthread_mutex_lock(&g_pool_mu);
     if (g_pool_count >= PG_POOL_MAX_COUNT || g_pool_bytes + nbytes > PG_POOL_MAX_BYTES) {
@@ -92,7 +93,7 @@ void pg_tensor_pool_clear(void) {
 size_t pg_tensor_pool_size(void) { size_t c; pthread_mutex_lock(&g_pool_mu); c=g_pool_count; pthread_mutex_unlock(&g_pool_mu); return c; }
 size_t pg_tensor_pool_bytes(void) { size_t b; pthread_mutex_lock(&g_pool_mu); b=g_pool_bytes; pthread_mutex_unlock(&g_pool_mu); return b; }
 
-static pg_data_ref *data_ref_create(float *ptr, size_t nbytes) {
+static pg_data_ref *data_ref_create(void *ptr, size_t nbytes) {
     pg_data_ref *r = (pg_data_ref*)malloc(sizeof(*r));
     if (!r) return NULL;
     r->ptr = ptr;
@@ -146,38 +147,33 @@ static void compute_strides(size_t ndim, const size_t *shape, size_t *stride)
     }
 }
 
-pg_tensor *pg_tensor_new(size_t ndim, const size_t *shape)
-{
-    if (!valid_shape(ndim, shape))
-        return NULL;
-
+static pg_tensor *tensor_alloc_dtype(pg_dtype dtype, size_t ndim, const size_t *shape, bool zero) {
+    if (!valid_shape(ndim, shape)) return NULL;
+    size_t elem_size = pg_dtype_size(dtype);
+    if (elem_size == 0) return NULL;
     size_t numel = 1;
     for (size_t i = 0; i < ndim; i++) {
-        if (numel > SIZE_MAX / shape[i])
-            return NULL;
+        if (numel > SIZE_MAX / shape[i]) return NULL;
         numel *= shape[i];
     }
-    if (numel > SIZE_MAX / sizeof(float))
-        return NULL;
-
+    if (numel > SIZE_MAX / elem_size) return NULL;
     pg_tensor *t = malloc(sizeof(*t));
-    if (!t)
-        return NULL;
-
-    size_t nbytes = numel * sizeof(float);
-    float *data = pool_acquire(nbytes);
+    if (!t) return NULL;
+    size_t nbytes = numel * elem_size;
+    void *data = pool_acquire(nbytes);
     if (!data) {
-        data = (float*)pg_aligned_alloc(nbytes);
+        data = pg_aligned_alloc(nbytes);
         if (!data) { free(t); return NULL; }
     }
-    memset(data, 0, nbytes);
+    if (zero) memset(data, 0, nbytes);
     pg_data_ref *ref = data_ref_create(data, nbytes);
     if (!ref) { pool_release(data, nbytes); free(t); return NULL; }
-    t->data = data;
+    t->data_raw = data;
     t->data_ref = ref;
     t->is_view = false;
     t->view_parent = NULL;
-
+    t->dtype = dtype;
+    t->elem_size = elem_size;
     t->ndim = ndim;
     memcpy(t->shape, shape, ndim * sizeof(size_t));
     compute_strides(ndim, t->shape, t->stride);
@@ -185,35 +181,43 @@ pg_tensor *pg_tensor_new(size_t ndim, const size_t *shape)
     return t;
 }
 
+pg_tensor *pg_tensor_new_dtype(pg_dtype dtype, size_t ndim, const size_t *shape){
+    return tensor_alloc_dtype(dtype, ndim, shape, true);
+}
+pg_tensor *pg_tensor_empty_dtype(pg_dtype dtype, size_t ndim, const size_t *shape){
+    return tensor_alloc_dtype(dtype, ndim, shape, false);
+}
+pg_tensor *pg_tensor_zeros_dtype(pg_dtype dtype, size_t ndim, const size_t *shape){
+    return tensor_alloc_dtype(dtype, ndim, shape, true);
+}
+pg_tensor *pg_tensor_ones_dtype(pg_dtype dtype, size_t ndim, const size_t *shape){
+    pg_tensor *t = tensor_alloc_dtype(dtype, ndim, shape, false);
+    if (!t) return NULL;
+    pg_tensor_fill(t, 1.0f);
+    return t;
+}
+pg_tensor *pg_tensor_full_dtype(pg_dtype dtype, size_t ndim, const size_t *shape, float value){
+    pg_tensor *t = tensor_alloc_dtype(dtype, ndim, shape, false);
+    if (!t) return NULL;
+    pg_tensor_fill(t, value);
+    return t;
+}
+pg_tensor *pg_tensor_from_data_dtype(pg_dtype dtype, size_t ndim, const size_t *shape, const void *data){
+    if (!data) return NULL;
+    pg_tensor *t = pg_tensor_empty_dtype(dtype, ndim, shape);
+    if (!t) return NULL;
+    memcpy(t->data_raw, data, t->numel * t->elem_size);
+    return t;
+}
+
+pg_tensor *pg_tensor_new(size_t ndim, const size_t *shape)
+{
+    return pg_tensor_new_dtype(PG_DTYPE_F32, ndim, shape);
+}
+
 pg_tensor *pg_tensor_empty(size_t ndim, const size_t *shape)
 {
-    if (!valid_shape(ndim, shape))
-        return NULL;
-    size_t numel = 1;
-    for (size_t i = 0; i < ndim; i++) {
-        if (numel > SIZE_MAX / shape[i]) return NULL;
-        numel *= shape[i];
-    }
-    if (numel > SIZE_MAX / sizeof(float)) return NULL;
-    pg_tensor *t = malloc(sizeof(*t));
-    if (!t) return NULL;
-    size_t nbytes = numel * sizeof(float);
-    float *data = pool_acquire(nbytes);
-    if (!data) {
-        data = (float*)pg_aligned_alloc(nbytes);
-        if (!data) { free(t); return NULL; }
-    }
-    pg_data_ref *ref = data_ref_create(data, nbytes);
-    if (!ref) { pool_release(data, nbytes); free(t); return NULL; }
-    t->data = data;
-    t->data_ref = ref;
-    t->is_view = false;
-    t->view_parent = NULL;
-    t->ndim = ndim;
-    memcpy(t->shape, shape, ndim * sizeof(size_t));
-    compute_strides(ndim, t->shape, t->stride);
-    t->numel = numel;
-    return t;
+    return pg_tensor_empty_dtype(PG_DTYPE_F32, ndim, shape);
 }
 
 void pg_tensor_free(pg_tensor *t)
@@ -226,32 +230,22 @@ void pg_tensor_free(pg_tensor *t)
 
 pg_tensor *pg_tensor_full(size_t ndim, const size_t *shape, float value)
 {
-    pg_tensor *t = pg_tensor_new(ndim, shape);
-    if (!t)
-        return NULL;
-    pg_tensor_fill(t, value);
-    return t;
+    return pg_tensor_full_dtype(PG_DTYPE_F32, ndim, shape, value);
 }
 
 pg_tensor *pg_tensor_zeros(size_t ndim, const size_t *shape)
 {
-    return pg_tensor_new(ndim, shape);
+    return pg_tensor_new_dtype(PG_DTYPE_F32, ndim, shape);
 }
 
 pg_tensor *pg_tensor_ones(size_t ndim, const size_t *shape)
 {
-    return pg_tensor_full(ndim, shape, 1.0f);
+    return pg_tensor_full_dtype(PG_DTYPE_F32, ndim, shape, 1.0f);
 }
 
 pg_tensor *pg_tensor_from_data(size_t ndim, const size_t *shape, const float *data)
 {
-    if (!data)
-        return NULL;
-    pg_tensor *t = pg_tensor_empty(ndim, shape);
-    if (!t)
-        return NULL;
-    memcpy(t->data, data, t->numel * sizeof(float));
-    return t;
+    return pg_tensor_from_data_dtype(PG_DTYPE_F32, ndim, shape, data);
 }
 
 pg_tensor *pg_tensor_arange(float start, float stop, float step)
@@ -353,8 +347,9 @@ pg_tensor *pg_tensor_eye(size_t n)
 
 pg_tensor *pg_tensor_clone(const pg_tensor *t)
 {
-    if (!t || !t->data) return NULL;
-    return pg_tensor_from_data(t->ndim, t->shape, t->data);
+    if (!t || !t->data_raw) return NULL;
+    if (t->dtype == PG_DTYPE_F32) return pg_tensor_from_data(t->ndim, t->shape, t->data);
+    return pg_tensor_from_data_dtype(t->dtype, t->ndim, t->shape, t->data_raw);
 }
 
 static size_t flat_index(const pg_tensor *t, const size_t *idx)
@@ -369,34 +364,50 @@ static size_t flat_index(const pg_tensor *t, const size_t *idx)
 
 float pg_tensor_get(const pg_tensor *t, const size_t *idx)
 {
-    assert(t && t->data && idx);
-    return t->data[flat_index(t, idx)];
+    assert(t && t->data_raw && idx);
+    size_t off = flat_index(t, idx);
+    if (t->dtype == PG_DTYPE_F32) return t->data[off];
+    if (t->dtype == PG_DTYPE_F16) return pg_f16_to_f32_scalar(t->data_u16[off]);
+    if (t->dtype == PG_DTYPE_BF16) return pg_bf16_to_f32_scalar(t->data_u16[off]);
+    return 0.0f;
 }
 
 void pg_tensor_set(pg_tensor *t, const size_t *idx, float value)
 {
-    assert(t && t->data && idx);
-    t->data[flat_index(t, idx)] = value;
+    assert(t && t->data_raw && idx);
+    size_t off = flat_index(t, idx);
+    if (t->dtype == PG_DTYPE_F32) t->data[off] = value;
+    else if (t->dtype == PG_DTYPE_F16) t->data_u16[off] = pg_f32_to_f16_scalar(value);
+    else if (t->dtype == PG_DTYPE_BF16) t->data_u16[off] = pg_f32_to_bf16_scalar(value);
 }
 
 void pg_tensor_fill(pg_tensor *t, float value)
 {
-    assert(t && t->data);
+    assert(t && t->data_raw);
     size_t n = t->numel;
-    if (n < 65536) {
-        for (size_t i = 0; i < n; i++) t->data[i] = value;
-    } else {
-        fill_par_t ctx={t->data, value};
-        pg_parallel_for(n, 65536, fill_par_fn, &ctx);
+    if (t->dtype == PG_DTYPE_F32) {
+        if (n < 65536) {
+            for (size_t i = 0; i < n; i++) t->data[i] = value;
+        } else {
+            fill_par_t ctx={t->data, value};
+            pg_parallel_for(n, 65536, fill_par_fn, &ctx);
+        }
+    } else if (t->dtype == PG_DTYPE_F16) {
+        uint16_t hv = pg_f32_to_f16_scalar(value);
+        for (size_t i=0;i<n;i++) t->data_u16[i]=hv;
+    } else if (t->dtype == PG_DTYPE_BF16) {
+        uint16_t bv = pg_f32_to_bf16_scalar(value);
+        for (size_t i=0;i<n;i++) t->data_u16[i]=bv;
     }
 }
 
 void pg_tensor_copy_from(pg_tensor *dst, const pg_tensor *src)
 {
-    assert(dst && src && dst->data && src->data);
+    assert(dst && src && dst->data_raw && src->data_raw);
     assert(dst->ndim == src->ndim);
     assert(memcmp(dst->shape, src->shape, dst->ndim * sizeof(size_t)) == 0);
-    memcpy(dst->data, src->data, src->numel * sizeof(float));
+    assert(dst->dtype == src->dtype);
+    memcpy(dst->data_raw, src->data_raw, src->numel * src->elem_size);
 }
 
 bool pg_tensor_reshape(pg_tensor *t, size_t ndim, const size_t *shape)
@@ -436,13 +447,39 @@ bool pg_shape_equal(size_t ndim_a, const size_t *shape_a, size_t ndim_b, const s
 
 bool pg_tensor_allclose(const pg_tensor *a, const pg_tensor *b, float rtol, float atol)
 {
-    assert(a && b && a->data && b->data);
+    assert(a && b && a->data_raw && b->data_raw);
     if (!pg_shape_equal(a->ndim, a->shape, b->ndim, b->shape))
         return false;
+    if (a->dtype != b->dtype) {
+        // compare as float
+        for (size_t i = 0; i < a->numel; i++) {
+            float av, bv;
+            if (a->dtype==PG_DTYPE_F32) av=a->data[i];
+            else if (a->dtype==PG_DTYPE_F16) av=pg_f16_to_f32_scalar(a->data_u16[i]);
+            else av=pg_bf16_to_f32_scalar(a->data_u16[i]);
+            if (b->dtype==PG_DTYPE_F32) bv=b->data[i];
+            else if (b->dtype==PG_DTYPE_F16) bv=pg_f16_to_f32_scalar(b->data_u16[i]);
+            else bv=pg_bf16_to_f32_scalar(b->data_u16[i]);
+            float diff = fabsf(av - bv);
+            if (!(diff <= atol + rtol * fabsf(bv)))
+                return false;
+        }
+        return true;
+    }
+    if (a->dtype == PG_DTYPE_F32) {
+        for (size_t i = 0; i < a->numel; i++) {
+            float diff = fabsf(a->data[i] - b->data[i]);
+            if (!(diff <= atol + rtol * fabsf(b->data[i])))
+                return false;
+        }
+        return true;
+    }
+    // f16/bf16: convert to float for comparison
     for (size_t i = 0; i < a->numel; i++) {
-        float diff = fabsf(a->data[i] - b->data[i]);
-        if (!(diff <= atol + rtol * fabsf(b->data[i])))
-            return false;
+        float av = (a->dtype==PG_DTYPE_F16)? pg_f16_to_f32_scalar(a->data_u16[i]) : pg_bf16_to_f32_scalar(a->data_u16[i]);
+        float bv = (b->dtype==PG_DTYPE_F16)? pg_f16_to_f32_scalar(b->data_u16[i]) : pg_bf16_to_f32_scalar(b->data_u16[i]);
+        float diff = fabsf(av - bv);
+        if (!(diff <= atol + rtol * fabsf(bv))) return false;
     }
     return true;
 }
@@ -451,8 +488,13 @@ static void print_rec(const pg_tensor *t, size_t dim, size_t offset, FILE *out)
 {
     fputc('[', out);
     if (dim == t->ndim - 1) {
-        for (size_t i = 0; i < t->shape[dim]; i++)
-            fprintf(out, i ? ", %g" : "%g", t->data[offset + i]);
+        for (size_t i = 0; i < t->shape[dim]; i++) {
+            float v;
+            if (t->dtype==PG_DTYPE_F32) v=t->data[offset + i];
+            else if (t->dtype==PG_DTYPE_F16) v=pg_f16_to_f32_scalar(t->data_u16[offset+i]);
+            else v=pg_bf16_to_f32_scalar(t->data_u16[offset+i]);
+            fprintf(out, i ? ", %g" : "%g", v);
+        }
     } else {
         for (size_t i = 0; i < t->shape[dim]; i++) {
             if (i)
@@ -464,7 +506,7 @@ static void print_rec(const pg_tensor *t, size_t dim, size_t offset, FILE *out)
 }
 
 pg_tensor *pg_tensor_view(const pg_tensor *src) {
-    if (!src || !src->data || !src->data_ref) return NULL;
+    if (!src || !src->data_raw || !src->data_ref) return NULL;
     pg_tensor *v = (pg_tensor*)malloc(sizeof(*v));
     if (!v) return NULL;
     memcpy(v, src, sizeof(*v));
@@ -474,7 +516,7 @@ pg_tensor *pg_tensor_view(const pg_tensor *src) {
     return v;
 }
 pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_t *shape) {
-    if (!src || !src->data || !valid_shape(ndim, shape)) return NULL;
+    if (!src || !src->data_raw || !valid_shape(ndim, shape)) return NULL;
     size_t numel = 1; for (size_t i=0;i<ndim;i++) numel*=shape[i];
     if (numel != src->numel) return NULL;
     // only allow reshape view if src is contiguous (row-major)
@@ -487,7 +529,7 @@ pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_
     return v;
 }
 pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order) {
-    if (!src || !src->data || !order) return NULL;
+    if (!src || !src->data_raw || !order) return NULL;
     for(size_t i=0;i<src->ndim;i++) if(order[i]>=src->ndim) return NULL;
     // check permutation is bijection
     bool seen[PG_MAX_NDIM]={0};
@@ -503,7 +545,7 @@ pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order) {
 
 void pg_tensor_print(const pg_tensor *t, FILE *out)
 {
-    assert(t && t->data && out);
+    assert(t && t->data_raw && out);
     print_rec(t, 0, 0, out);
     fputc('\n', out);
 }

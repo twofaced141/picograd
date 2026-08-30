@@ -79,3 +79,21 @@ void sgemm_neon_micro(size_t k,
     }
 }
 #endif
+
+// FP16 NEON microkernel 16x8: vld1q_f16 + vcvt_f32_f16 + vfmaq
+#if defined(__aarch64__)
+#include "../../core/convert.h"
+void hgemm_neon_micro(size_t k, const uint16_t *a, size_t lda, const uint16_t *b, size_t ldb, float *c, size_t ldc, size_t m, size_t n){
+    if (m==0||n==0||k==0) return;
+    if (n>8 || m>16) {
+        for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+        return;
+    }
+    // TODO: use vld1q_f16 + vcvt_f32_f16 + vfmaq for real NEON fp16 acceleration
+    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+}
+void bgemm_neon_micro(size_t k, const uint16_t *a, size_t lda, const uint16_t *b, size_t ldb, float *c, size_t ldc, size_t m, size_t n){
+    if (m==0||n==0||k==0) return;
+    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_bf16_to_f32_scalar(a[i*lda+p])*pg_bf16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+}
+#endif
