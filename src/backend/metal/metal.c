@@ -8,9 +8,11 @@
 #import <Foundation/Foundation.h>
 
 #include <assert.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define PG_METAL_THREADS 256
 
@@ -23,6 +25,44 @@ static id<MTLComputePipelineState> g_p_accum_scatter;
 static id<MTLComputePipelineState> g_p_sum_axis;
 static id<MTLComputePipelineState> g_p_softmax;
 static id<MTLComputePipelineState> g_p_copy_strided;
+
+/* ---------- Metal buffer tracking ----------
+ * newBufferWithLength returns a retained MTLBuffer object.  We return its
+ * contents pointer to the caller (pg_dev_malloc API expects a plain void*),
+ * but retain the buffer object in a linked list so we can later recover
+ * the MTLBuffer and byte offset for setBuffer:offset:atIndex:.
+ * Pointer arithmetic (da.ptr + offset) used by matmul.c produces interior
+ * pointers; lookup therefore searches by range, not exact match.
+ */
+struct metal_alloc {
+    void *ptr;              /* [buf contents] – base */
+    id<MTLBuffer> buf;      /* retained */
+    size_t nbytes;
+    struct metal_alloc *next;
+};
+static pthread_mutex_t g_metal_alloc_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct metal_alloc *g_metal_allocs = NULL;
+
+static id<MTLBuffer> metal_buffer_for_ptr(void *p, size_t *out_offset)
+{
+    pthread_mutex_lock(&g_metal_alloc_mu);
+    struct metal_alloc *cur = g_metal_allocs;
+    while (cur) {
+        uintptr_t start = (uintptr_t)cur->ptr;
+        uintptr_t end = start + cur->nbytes;
+        uintptr_t q = (uintptr_t)p;
+        if (q >= start && q < end) {
+            if (out_offset) *out_offset = (size_t)(q - start);
+            id<MTLBuffer> b = cur->buf;
+            pthread_mutex_unlock(&g_metal_alloc_mu);
+            return b;
+        }
+        cur = cur->next;
+    }
+    pthread_mutex_unlock(&g_metal_alloc_mu);
+    if (out_offset) *out_offset = 0;
+    return nil;
+}
 
 /* ---------- embedded MSL kernel source ---------- */
 
@@ -296,8 +336,8 @@ static pg_status metal_compile_library(void)
         NSString *src = [NSString stringWithUTF8String:msl_source()];
         NSError *err = nil;
         id<MTLLibrary> lib = [g_device newLibraryWithSource:src
-                                                   options:nil
-                                                     error:&err];
+                                                    options:nil
+                                                      error:&err];
         if (!lib) {
             fprintf(stderr, "[metal] MSL compile error: %s\n",
                     [[err localizedDescription] UTF8String]);
@@ -356,16 +396,45 @@ static pg_status metal_init(void)
 static void *metal_malloc(size_t nbytes)
 {
     if (metal_init() != PG_OK) return NULL;
+    size_t len = nbytes ? nbytes : 1;
     @autoreleasepool {
-        id<MTLBuffer> buf = [g_device newBufferWithLength:nbytes ? nbytes : 1
-                                                 options:MTLResourceStorageModeShared];
-        return buf ? [buf contents] : NULL;
+        id<MTLBuffer> buf = [g_device newBufferWithLength:len
+                                                  options:MTLResourceStorageModeShared];
+        if (!buf) return NULL;
+        void *ptr = [buf contents];
+        if (!ptr) { [buf release]; return NULL; }
+        struct metal_alloc *a = (struct metal_alloc *)malloc(sizeof(*a));
+        if (!a) { [buf release]; return NULL; }
+        a->ptr = ptr;
+        a->buf = buf; /* retained by newBufferWithLength (+1) */
+        a->nbytes = len;
+        pthread_mutex_lock(&g_metal_alloc_mu);
+        a->next = g_metal_allocs;
+        g_metal_allocs = a;
+        pthread_mutex_unlock(&g_metal_alloc_mu);
+        return ptr;
     }
 }
 
 static void metal_free(void *p)
 {
-    (void)p;
+    if (!p) return;
+    struct metal_alloc *found = NULL;
+    pthread_mutex_lock(&g_metal_alloc_mu);
+    struct metal_alloc **pp = &g_metal_allocs;
+    while (*pp) {
+        if ((*pp)->ptr == p) {
+            found = *pp;
+            *pp = found->next;
+            break;
+        }
+        pp = &(*pp)->next;
+    }
+    pthread_mutex_unlock(&g_metal_alloc_mu);
+    if (found) {
+        @autoreleasepool { [found->buf release]; }
+        free(found);
+    }
 }
 
 static pg_status metal_h2d(void *dst, const void *src, size_t nbytes)
@@ -407,13 +476,22 @@ static void metal_gemm(size_t m, size_t n, size_t k,
     if (metal_init() != PG_OK) { assert(!"metal backend not initialized"); return; }
 
     @autoreleasepool {
+        size_t off_a = 0, off_b = 0, off_c = 0;
+        id<MTLBuffer> buf_a = metal_buffer_for_ptr((void *)a, &off_a);
+        id<MTLBuffer> buf_b = metal_buffer_for_ptr((void *)b, &off_b);
+        id<MTLBuffer> buf_c = metal_buffer_for_ptr((void *)c, &off_c);
+        if (!buf_a || !buf_b || !buf_c) {
+            fprintf(stderr, "[metal] gemm: invalid buffer pointer\n");
+            assert(!"metal_gemm invalid buffer");
+            return;
+        }
         id<MTLCommandBuffer> cb = [g_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
         [enc setComputePipelineState:g_p_sgemm];
-        [enc setBuffer:(id<MTLBuffer>)(void *)a  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)b  offset:0 atIndex:1];
-        [enc setBuffer:(id<MTLBuffer>)(void *)c offset:0 atIndex:2];
+        [enc setBuffer:buf_a offset:off_a atIndex:0];
+        [enc setBuffer:buf_b offset:off_b atIndex:1];
+        [enc setBuffer:buf_c offset:off_c atIndex:2];
 
         uint32_t m32 = (uint32_t)m, n32 = (uint32_t)n, k32 = (uint32_t)k;
         [enc setBytes:&m32 length:sizeof(m32) atIndex:3];
@@ -421,7 +499,7 @@ static void metal_gemm(size_t m, size_t n, size_t k,
         [enc setBytes:&k32 length:sizeof(k32) atIndex:5];
 
         MTLSize grid  = MTLSizeMake((n + BTILE - 1) / BTILE * TPT,
-                                    (m + BTILE - 1) / BTILE * TPT, 1);
+                                     (m + BTILE - 1) / BTILE * TPT, 1);
         MTLSize group = MTLSizeMake(TPT, TPT, 1);
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
 
@@ -437,6 +515,7 @@ static pg_status metal_dispatch_1d(id<MTLComputePipelineState> pso,
                                    size_t n, size_t nargs,
                                    void (^set_args)(id<MTLComputeCommandEncoder>))
 {
+    (void)nargs;
     @autoreleasepool {
         id<MTLCommandBuffer> cb = [g_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -445,7 +524,8 @@ static pg_status metal_dispatch_1d(id<MTLComputePipelineState> pso,
         set_args(enc);
 
         NSUInteger tg = [pso threadExecutionWidth];
-        MTLSize grid  = MTLSizeMake((n + tg - 1) / tg, 1, 1);
+        if (tg == 0) tg = PG_METAL_THREADS;
+        MTLSize grid  = MTLSizeMake((n + tg - 1) / tg * tg, 1, 1);
         MTLSize group = MTLSizeMake(tg, 1, 1);
         [enc dispatchThreads:grid threadsPerThreadgroup:group];
 
@@ -459,51 +539,68 @@ static pg_status metal_dispatch_1d(id<MTLComputePipelineState> pso,
 static pg_status metal_gpu_map(float *out, const float *src, size_t n, int op)
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
+    size_t off_out = 0, off_src = 0;
+    id<MTLBuffer> bo = metal_buffer_for_ptr(out, &off_out);
+    id<MTLBuffer> bs = metal_buffer_for_ptr((void *)src, &off_src);
+    if (!bo || !bs) return PG_ERR_GEMM;
     uint32_t n32 = (uint32_t)n, op32 = (uint32_t)op;
     return metal_dispatch_1d(g_p_map, n, 4, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:bo offset:off_out atIndex:0];
+        [enc setBuffer:bs offset:off_src  atIndex:1];
         [enc setBytes:&n32 length:sizeof(n32) atIndex:2];
         [enc setBytes:&op32 length:sizeof(op32) atIndex:3];
     });
 }
 
 static pg_status metal_gpu_bin(float *out, const float *a, const float *b,
-                                size_t n, int op, const pg_k_bin_args *args)
+                                 size_t n, int op, const pg_k_bin_args *args)
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
+    size_t off_out = 0, off_a = 0, off_b = 0;
+    id<MTLBuffer> bo = metal_buffer_for_ptr(out, &off_out);
+    id<MTLBuffer> ba = metal_buffer_for_ptr((void *)a, &off_a);
+    id<MTLBuffer> bb = metal_buffer_for_ptr((void *)b, &off_b);
+    if (!bo || !ba || !bb) return PG_ERR_GEMM;
     uint32_t op32 = (uint32_t)op;
     return metal_dispatch_1d(g_p_bin, n, 5, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)a    offset:0 atIndex:1];
-        [enc setBuffer:(id<MTLBuffer>)(void *)b    offset:0 atIndex:2];
+        [enc setBuffer:bo offset:off_out atIndex:0];
+        [enc setBuffer:ba offset:off_a   atIndex:1];
+        [enc setBuffer:bb offset:off_b   atIndex:2];
         [enc setBytes:&op32 length:sizeof(op32) atIndex:3];
         [enc setBytes:(void *)args length:sizeof(*args) atIndex:4];
     });
 }
 
 static pg_status metal_gpu_accum_scatter(float *dst, const float *src,
-                                          float scale, const pg_k_strides *args)
+                                           float scale, const pg_k_strides *args)
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
+    size_t off_dst = 0, off_src = 0;
+    id<MTLBuffer> bd = metal_buffer_for_ptr(dst, &off_dst);
+    id<MTLBuffer> bs = metal_buffer_for_ptr((void *)src, &off_src);
+    if (!bd || !bs) return PG_ERR_GEMM;
     return metal_dispatch_1d(g_p_accum_scatter, args->numel, 4, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(id<MTLBuffer>)(void *)dst  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:bd offset:off_dst atIndex:0];
+        [enc setBuffer:bs offset:off_src atIndex:1];
         [enc setBytes:&scale length:sizeof(scale) atIndex:2];
         [enc setBytes:(void *)args length:sizeof(*args) atIndex:3];
     });
 }
 
 static pg_status metal_gpu_sum_axis(float *out, const float *src, float scale,
-                                     size_t outer, size_t len, size_t inner,
-                                     size_t keepdim_stride)
+                                      size_t outer, size_t len, size_t inner,
+                                      size_t keepdim_stride)
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
+    size_t off_out = 0, off_src = 0;
+    id<MTLBuffer> bo = metal_buffer_for_ptr(out, &off_out);
+    id<MTLBuffer> bs = metal_buffer_for_ptr((void *)src, &off_src);
+    if (!bo || !bs) return PG_ERR_GEMM;
     uint32_t o32 = (uint32_t)outer, l32 = (uint32_t)len;
     uint32_t i32 = (uint32_t)inner, ks32 = (uint32_t)keepdim_stride;
     return metal_dispatch_1d(g_p_sum_axis, outer * inner, 7, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:bo offset:off_out atIndex:0];
+        [enc setBuffer:bs offset:off_src  atIndex:1];
         [enc setBytes:&scale length:sizeof(scale) atIndex:2];
         [enc setBytes:&o32  length:sizeof(o32)  atIndex:3];
         [enc setBytes:&l32  length:sizeof(l32)  atIndex:4];
@@ -513,13 +610,17 @@ static pg_status metal_gpu_sum_axis(float *out, const float *src, float scale,
 }
 
 static pg_status metal_gpu_softmax(float *out, const float *src,
-                                    size_t outer, size_t len, size_t inner)
+                                     size_t outer, size_t len, size_t inner)
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
+    size_t off_out = 0, off_src = 0;
+    id<MTLBuffer> bo = metal_buffer_for_ptr(out, &off_out);
+    id<MTLBuffer> bs = metal_buffer_for_ptr((void *)src, &off_src);
+    if (!bo || !bs) return PG_ERR_GEMM;
     uint32_t o32 = (uint32_t)outer, l32 = (uint32_t)len, i32 = (uint32_t)inner;
     return metal_dispatch_1d(g_p_softmax, outer * inner, 5, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:bo offset:off_out atIndex:0];
+        [enc setBuffer:bs offset:off_src  atIndex:1];
         [enc setBytes:&o32 length:sizeof(o32) atIndex:2];
         [enc setBytes:&l32 length:sizeof(l32) atIndex:3];
         [enc setBytes:&i32 length:sizeof(i32) atIndex:4];
@@ -527,12 +628,16 @@ static pg_status metal_gpu_softmax(float *out, const float *src,
 }
 
 static pg_status metal_gpu_copy_strided(float *dst, const float *src,
-                                         const pg_k_strides *args)
+                                          const pg_k_strides *args)
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
+    size_t off_dst = 0, off_src = 0;
+    id<MTLBuffer> bd = metal_buffer_for_ptr(dst, &off_dst);
+    id<MTLBuffer> bs = metal_buffer_for_ptr((void *)src, &off_src);
+    if (!bd || !bs) return PG_ERR_GEMM;
     return metal_dispatch_1d(g_p_copy_strided, args->numel, 3, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(id<MTLBuffer>)(void *)dst  offset:0 atIndex:0];
-        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:bd offset:off_dst atIndex:0];
+        [enc setBuffer:bs offset:off_src  atIndex:1];
         [enc setBytes:(void *)args length:sizeof(*args) atIndex:2];
     });
 }
