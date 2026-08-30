@@ -113,9 +113,10 @@ SRC      += $(wildcard src/backend/metal/*.c)
 SRC      += $(wildcard src/backend/metal/*.m)
 ifeq ($(shell uname),Darwin)
 LDLIBS   += -framework Metal -framework Foundation -lobjc
-# metal.c contains Objective-C (Metal/Foundation imports, blocks, ARC).
-# Force clang to compile it as Objective-C on macOS.
-$(BUILD)/src/backend/metal/%.o: CFLAGS += -x objective-c -fobjc-arc -fblocks
+# metal.c contains Objective-C (Metal/Foundation imports, blocks).
+# Force clang to compile it as Objective-C on macOS (no ARC – avoids
+# bridged-cast errors; metal uses manual buffer-pointer handling).
+$(BUILD)/src/backend/metal/%.o: CFLAGS += -x objective-c -fblocks -fno-objc-arc
 endif
 endif
 

@@ -401,9 +401,9 @@ static void metal_gemm(size_t m, size_t n, size_t k,
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
         [enc setComputePipelineState:g_p_sgemm];
-        [enc setBuffer:(void *)a  offset:0 atIndex:0];
-        [enc setBuffer:(void *)b  offset:0 atIndex:1];
-        [enc setBuffer:c           offset:0 atIndex:2];
+        [enc setBuffer:(id<MTLBuffer>)(void *)a  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)b  offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)c offset:0 atIndex:2];
 
         uint32_t m32 = (uint32_t)m, n32 = (uint32_t)n, k32 = (uint32_t)k;
         [enc setBytes:&m32 length:sizeof(m32) atIndex:3];
@@ -451,8 +451,8 @@ static pg_status metal_gpu_map(float *out, const float *src, size_t n, int op)
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
     uint32_t n32 = (uint32_t)n, op32 = (uint32_t)op;
     return metal_dispatch_1d(g_p_map, n, 4, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
         [enc setBytes:&n32 length:sizeof(n32) atIndex:2];
         [enc setBytes:&op32 length:sizeof(op32) atIndex:3];
     });
@@ -464,9 +464,9 @@ static pg_status metal_gpu_bin(float *out, const float *a, const float *b,
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
     uint32_t op32 = (uint32_t)op;
     return metal_dispatch_1d(g_p_bin, n, 5, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(void *)a    offset:0 atIndex:1];
-        [enc setBuffer:(void *)b    offset:0 atIndex:2];
+        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)a    offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)b    offset:0 atIndex:2];
         [enc setBytes:&op32 length:sizeof(op32) atIndex:3];
         [enc setBytes:(void *)args length:sizeof(*args) atIndex:4];
     });
@@ -477,8 +477,8 @@ static pg_status metal_gpu_accum_scatter(float *dst, const float *src,
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
     return metal_dispatch_1d(g_p_accum_scatter, args->numel, 4, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)dst  offset:0 atIndex:0];
-        [enc setBuffer:(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)dst  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
         [enc setBytes:&scale length:sizeof(scale) atIndex:2];
         [enc setBytes:(void *)args length:sizeof(*args) atIndex:3];
     });
@@ -492,8 +492,8 @@ static pg_status metal_gpu_sum_axis(float *out, const float *src, float scale,
     uint32_t o32 = (uint32_t)outer, l32 = (uint32_t)len;
     uint32_t i32 = (uint32_t)inner, ks32 = (uint32_t)keepdim_stride;
     return metal_dispatch_1d(g_p_sum_axis, outer * inner, 7, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
         [enc setBytes:&scale length:sizeof(scale) atIndex:2];
         [enc setBytes:&o32  length:sizeof(o32)  atIndex:3];
         [enc setBytes:&l32  length:sizeof(l32)  atIndex:4];
@@ -508,8 +508,8 @@ static pg_status metal_gpu_softmax(float *out, const float *src,
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
     uint32_t o32 = (uint32_t)outer, l32 = (uint32_t)len, i32 = (uint32_t)inner;
     return metal_dispatch_1d(g_p_softmax, outer * inner, 5, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)out  offset:0 atIndex:0];
-        [enc setBuffer:(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)out  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
         [enc setBytes:&o32 length:sizeof(o32) atIndex:2];
         [enc setBytes:&l32 length:sizeof(l32) atIndex:3];
         [enc setBytes:&i32 length:sizeof(i32) atIndex:4];
@@ -521,8 +521,8 @@ static pg_status metal_gpu_copy_strided(float *dst, const float *src,
 {
     if (metal_init() != PG_OK) return PG_ERR_GEMM;
     return metal_dispatch_1d(g_p_copy_strided, args->numel, 3, ^(id<MTLComputeCommandEncoder> enc) {
-        [enc setBuffer:(void *)dst  offset:0 atIndex:0];
-        [enc setBuffer:(void *)src  offset:0 atIndex:1];
+        [enc setBuffer:(id<MTLBuffer>)(void *)dst  offset:0 atIndex:0];
+        [enc setBuffer:(id<MTLBuffer>)(void *)src  offset:0 atIndex:1];
         [enc setBytes:(void *)args length:sizeof(*args) atIndex:2];
     });
 }
