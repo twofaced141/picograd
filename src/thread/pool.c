@@ -4,11 +4,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <unistd.h>
 #if defined(__APPLE__)
 #include <sys/types.h>
-#include <sys/sysctl.h>
-#else
-#include <unistd.h>
+// sys/sysctl.h breaks with -std=c11 -D_POSIX_C_SOURCE on macOS (u_int, etc.)
+// declare sysctlbyname directly instead of including <sys/sysctl.h>
+extern int sysctlbyname(const char *, void *, size_t *, void *, size_t);
 #endif
 
 typedef struct pg_task {
