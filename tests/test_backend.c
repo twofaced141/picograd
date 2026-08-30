@@ -63,7 +63,22 @@ static void test_cpu_dispatch(void)
 {
     CHECK(pg_set_device(PG_DEV_CPU) == PG_OK);
     CHECK(pg_get_device() == PG_DEV_CPU);
+#if defined(PICOGRAD_BACKEND_METAL)
+    {
+        pg_status st = pg_set_device(PG_DEV_METAL);
+        if (st == PG_OK) {
+            CHECK(pg_get_device() == PG_DEV_METAL);
+            CHECK(pg_set_device(PG_DEV_CPU) == PG_OK);
+            CHECK(pg_get_device() == PG_DEV_CPU);
+        } else {
+            CHECK(st == PG_ERR_UNSUPPORTED || st == PG_ERR_GEMM || st == PG_ERR_ALLOC);
+            CHECK(pg_set_device(PG_DEV_CPU) == PG_OK);
+            CHECK(pg_get_device() == PG_DEV_CPU);
+        }
+    }
+#else
     CHECK(pg_set_device(PG_DEV_METAL) == PG_ERR_UNSUPPORTED);
+#endif
 
     enum { M = 13, N = 9, K = 7 };
     float a[M * K], b[K * N], c[M * N];
