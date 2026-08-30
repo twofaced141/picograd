@@ -1,10 +1,10 @@
 #include "activations.h"
 
 #include "common.h"
+#include "simd.h"
 #include "../backend/backend.h"
 #include "../thread/pool.h"
 #include <assert.h>
-#include <immintrin.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -97,29 +97,15 @@ static pg_tensor *try_map_gpu_act(const pg_tensor *a, int op)
 static float fsigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 static float fgelu(float x) { return 0.5f * x * (1.0f + erff(x * 0.70710678118f)); }
 
-static void relu_avx(float *d, size_t n){
-    size_t i=0;
-    __m256 z=_mm256_setzero_ps();
-    for(; i+8<=n; i+=8){ __m256 v=_mm256_loadu_ps(d+i); v=_mm256_max_ps(v,z); _mm256_storeu_ps(d+i,v); }
-    for(; i<n; i++) d[i]= d[i]>0?d[i]:0;
-}
-static void leaky_avx(float *d, size_t n, float alpha){
-    size_t i=0;
-    __m256 a=_mm256_set1_ps(alpha);
-    __m256 z=_mm256_setzero_ps();
-    for(; i+8<=n; i+=8){
-        __m256 v=_mm256_loadu_ps(d+i);
-        __m256 mask=_mm256_cmp_ps(v,z, _CMP_GT_OQ);
-        __m256 av=_mm256_mul_ps(v,a);
-        __m256 res=_mm256_blendv_ps(av, v, mask);
-        _mm256_storeu_ps(d+i,res);
-    }
-    for(; i<n;i++){ float v=d[i]; d[i]= v>0? v: alpha*v; }
-}
+static inline void relu_simd(float *d, size_t n){ simd_relu(d,n); }
+static inline void leaky_simd(float *d, size_t n, float alpha){ simd_leaky_relu(d,n,alpha); }
+// compat aliases for previous avx names
+#define relu_avx relu_simd
+#define leaky_avx leaky_simd
 typedef struct { float *d; } relu_par_t;
-static void relu_par_fn(void *ctx, size_t s, size_t e){ relu_par_t *p=(relu_par_t*)ctx; relu_avx(p->d + s, e - s); }
+static void relu_par_fn(void *ctx, size_t s, size_t e){ relu_par_t *p=(relu_par_t*)ctx; relu_simd(p->d + s, e - s); }
 typedef struct { float *d; float alpha; } leaky_par2_t;
-static void leaky_par2_fn(void *ctx, size_t s, size_t e){ leaky_par2_t *p=(leaky_par2_t*)ctx; leaky_avx(p->d + s, e - s, p->alpha); }
+static void leaky_par2_fn(void *ctx, size_t s, size_t e){ leaky_par2_t *p=(leaky_par2_t*)ctx; leaky_simd(p->d + s, e - s, p->alpha); }
 
 pg_tensor *pg_relu(const pg_tensor *a)
 {
@@ -129,7 +115,7 @@ pg_tensor *pg_relu(const pg_tensor *a)
     if(!r) return NULL;
     float *pr=r->data; size_t n=r->numel;
     if(n < 65536){
-        if(n >= 32) relu_avx(pr,n);
+        if(n >= 32) simd_relu(pr,n);
         else { for(size_t i=0;i<n;i++) pr[i]= pr[i]>0?pr[i]:0; }
     } else {
         relu_par_t ctx={pr};
@@ -166,7 +152,7 @@ pg_tensor *pg_leaky_relu(const pg_tensor *a, float alpha)
     float *restrict pr = r->data;
     size_t n = r->numel;
     if (n < 65536) {
-        if(n >= 32) leaky_avx(pr, n, alpha);
+        if(n >= 32) simd_leaky_relu(pr, n, alpha);
         else for (size_t i = 0; i < n; i++) { float v = pr[i]; pr[i] = v > 0.0f ? v : alpha * v; }
     } else {
         leaky_par2_t ctx={pr,alpha};

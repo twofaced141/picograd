@@ -78,6 +78,57 @@ jobs:
           make -j$(nproc) BACKEND=rocm
           make test BACKEND=rocm
 
+  aarch64:
+    name: aarch64 cross + qemu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain and qemu
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu qemu-user qemu-user-static
+
+      - name: Show cross toolchain
+        run: |
+          aarch64-linux-gnu-gcc --version
+          qemu-aarch64 --version
+
+      - name: Build ARCH=aarch64 (Neoverse-N1, neon baseline)
+        run: |
+          make clean
+          make -j$(nproc) ARCH=aarch64 CC=aarch64-linux-gnu-gcc
+
+      - name: Run aarch64 tests under qemu (neoverse-n1, no SVE)
+        run: |
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-n1 ./build/test_gemm
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-n1 ./build/test_ops
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-n1 ./build/test_autograd
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-n1 ./build/test_training
+
+      - name: Build ARCH=aarch64 NEOVERSE=v1 (SVE 256)
+        run: |
+          make clean
+          make -j$(nproc) ARCH=aarch64 NEOVERSE=v1 CC=aarch64-linux-gnu-gcc
+
+      - name: Run aarch64 SVE tests under qemu (neoverse-v1, VL=256)
+        run: |
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-v1 ./build/test_gemm
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-v1 ./build/test_ops
+
+      - name: Build ARCH=generic (qemu CI, no SIMD)
+        run: |
+          make clean
+          make -j$(nproc) ARCH=generic
+          make test ARCH=generic
+
+      - name: Build ARCH=generic cross (aarch64 generic, qemu)
+        run: |
+          make clean
+          make -j$(nproc) ARCH=generic CC=aarch64-linux-gnu-gcc
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-n1 ./build/test_gemm
+          qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu neoverse-n1 ./build/test_ops
+
   sanitize:
     name: sanitizers (gcc asan+ubsan)
     runs-on: ubuntu-latest

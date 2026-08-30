@@ -1,10 +1,10 @@
 #include "elementwise.h"
 
 #include "common.h"
+#include "simd.h"
 #include "../backend/backend.h"
 #include "../thread/pool.h"
 #include <assert.h>
-#include <immintrin.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -16,39 +16,12 @@ static float fmul(float x, float y) { return x * y; }
 static float fdiv(float x, float y) { return x / y; }
 static float fpow(float x, float y) { return powf(x, y); }
 
-static inline void avx_bin_add(const float *a, const float *b, float *o, size_t n){
-    size_t i=0;
-    for(; i+8<=n; i+=8){ __m256 va=_mm256_loadu_ps(a+i); __m256 vb=_mm256_loadu_ps(b+i); __m256 vc=_mm256_add_ps(va,vb); _mm256_storeu_ps(o+i, vc); }
-    for(; i<n; i++) o[i]=a[i]+b[i];
-}
-static inline void avx_bin_sub(const float *a, const float *b, float *o, size_t n){
-    size_t i=0;
-    for(; i+8<=n; i+=8){ __m256 va=_mm256_loadu_ps(a+i); __m256 vb=_mm256_loadu_ps(b+i); __m256 vc=_mm256_sub_ps(va,vb); _mm256_storeu_ps(o+i, vc); }
-    for(; i<n; i++) o[i]=a[i]-b[i];
-}
-static inline void avx_bin_mul(const float *a, const float *b, float *o, size_t n){
-    size_t i=0;
-    for(; i+8<=n; i+=8){ __m256 va=_mm256_loadu_ps(a+i); __m256 vb=_mm256_loadu_ps(b+i); __m256 vc=_mm256_mul_ps(va,vb); _mm256_storeu_ps(o+i, vc); }
-    for(; i<n; i++) o[i]=a[i]*b[i];
-}
-static inline void avx_bin_div(const float *a, const float *b, float *o, size_t n){
-    size_t i=0;
-    for(; i+8<=n; i+=8){ __m256 va=_mm256_loadu_ps(a+i); __m256 vb=_mm256_loadu_ps(b+i); __m256 vc=_mm256_div_ps(va,vb); _mm256_storeu_ps(o+i, vc); }
-    for(; i<n; i++) o[i]=a[i]/b[i];
-}
-static inline void avx_scalar_add(const float *a, float bv, float *o, size_t n){
-    __m256 vb=_mm256_set1_ps(bv);
-    size_t i=0;
-    for(; i+8<=n; i+=8){ __m256 va=_mm256_loadu_ps(a+i); __m256 vc=_mm256_add_ps(va,vb); _mm256_storeu_ps(o+i, vc); }
-    for(; i<n; i++) o[i]=a[i]+bv;
-}
-
 // parallel helpers for contiguous binary ops
 typedef struct { const float *a; const float *b; float *out; } bin_par_t;
-static void par_add(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; avx_bin_add(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_sub(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; avx_bin_sub(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_mul(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; avx_bin_mul(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_div(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; avx_bin_div(p->a+s, p->b+s, p->out+s, e-s); }
+static void par_add(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_add(p->a+s, p->b+s, p->out+s, e-s); }
+static void par_sub(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_sub(p->a+s, p->b+s, p->out+s, e-s); }
+static void par_mul(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_mul(p->a+s, p->b+s, p->out+s, e-s); }
+static void par_div(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_div(p->a+s, p->b+s, p->out+s, e-s); }
 static void par_pow(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; const float *a=p->a; const float *b=p->b; float *o=p->out; for(size_t i=s;i<e;i++) o[i]=powf(a[i],b[i]); }
 
 typedef struct { float av; const float *b; float *out; float (*f)(float,float); } scalar_par_t;
@@ -93,10 +66,10 @@ for(size_t j=0;j<p->N;j++) por[j]=ff(pa[j],pbr[j]); } }
 // helper to dispatch vectorized parallel for same-shape contiguous
 static inline void dispatch_contiguous(const float *pa, const float *pb, float *po, size_t n, float (*f)(float,float)) {
     if (n < 262144) {
-        if (f==fadd) { avx_bin_add(pa,pb,po,n); }
-        else if (f==fsub) { avx_bin_sub(pa,pb,po,n); }
-        else if (f==fmul) { avx_bin_mul(pa,pb,po,n); }
-        else if (f==fdiv) { avx_bin_div(pa,pb,po,n); }
+        if (f==fadd) { simd_bin_add(pa,pb,po,n); }
+        else if (f==fsub) { simd_bin_sub(pa,pb,po,n); }
+        else if (f==fmul) { simd_bin_mul(pa,pb,po,n); }
+        else if (f==fdiv) { simd_bin_div(pa,pb,po,n); }
         else if (f==fpow) { for (size_t i=0;i<n;i++) po[i]=powf(pa[i],pb[i]); }
         else { for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i]); }
         return;

@@ -1,3 +1,8 @@
+#if defined(__aarch64__) && defined(__linux__)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#endif
 #include "gemm.h"
 
 #include "../../thread/pool.h"
@@ -7,6 +12,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__aarch64__) || defined(PG_ARCH_AARCH64)
+#include <sys/auxv.h>
+#ifdef __linux__
+#include <asm/hwcap.h>
+#endif
+#endif
+
+#if defined(PG_ARCH_X86_64)
 extern void sgemm_avx2_micro(size_t k,
                              const float *a, size_t lda,
                              const float *b, size_t ldb,
@@ -17,11 +30,79 @@ extern void sgemm_avx512_micro(size_t k,
                                const float *b, size_t ldb,
                                float *c, size_t ldc,
                                size_t m, size_t n);
+#elif defined(PG_ARCH_AARCH64)
+extern void sgemm_neon_micro(size_t k,
+                             const float *a, size_t lda,
+                             const float *b, size_t ldb,
+                             float *c, size_t ldc,
+                             size_t m, size_t n);
+#if defined(PG_HAVE_SVE) || defined(__ARM_FEATURE_SVE)
+extern void sgemm_sve_micro(size_t k,
+                            const float *a, size_t lda,
+                            const float *b, size_t ldb,
+                            float *c, size_t ldc,
+                            size_t m, size_t n);
+#endif
+extern void sgemm_generic_micro(size_t k,
+                                const float *a, size_t lda,
+                                const float *b, size_t ldb,
+                                float *c, size_t ldc,
+                                size_t m, size_t n);
+#elif defined(PG_ARCH_GENERIC)
+extern void sgemm_generic_micro(size_t k,
+                                const float *a, size_t lda,
+                                const float *b, size_t ldb,
+                                float *c, size_t ldc,
+                                size_t m, size_t n);
+#else
+// auto-detect (no PG_ARCH defined): fallback to host macros
+#if defined(__x86_64__) || defined(__i386__)
+extern void sgemm_avx2_micro(size_t k,
+                             const float *a, size_t lda,
+                             const float *b, size_t ldb,
+                             float *c, size_t ldc,
+                             size_t m, size_t n);
+extern void sgemm_avx512_micro(size_t k,
+                               const float *a, size_t lda,
+                               const float *b, size_t ldb,
+                               float *c, size_t ldc,
+                               size_t m, size_t n);
+#endif
+#if defined(__aarch64__)
+extern void sgemm_neon_micro(size_t k,
+                             const float *a, size_t lda,
+                             const float *b, size_t ldb,
+                             float *c, size_t ldc,
+                             size_t m, size_t n);
+#if defined(PG_HAVE_SVE) || defined(__ARM_FEATURE_SVE)
+extern void sgemm_sve_micro(size_t k,
+                            const float *a, size_t lda,
+                            const float *b, size_t ldb,
+                            float *c, size_t ldc,
+                            size_t m, size_t n);
+#endif
+extern void sgemm_generic_micro(size_t k,
+                                const float *a, size_t lda,
+                                const float *b, size_t ldb,
+                                float *c, size_t ldc,
+                                size_t m, size_t n);
+#elif !defined(__x86_64__) && !defined(__i386__)
+extern void sgemm_generic_micro(size_t k,
+                                const float *a, size_t lda,
+                                const float *b, size_t ldb,
+                                float *c, size_t ldc,
+                                size_t m, size_t n);
+#endif
+#endif
 
 #define PG_KC 256
 #define PG_MR 8
 #define PG_NR_AVX2    8
 #define PG_NR_AVX512 16
+#define PG_NR_NEON    8
+#define PG_NR_SVE    16
+#define PG_NR_GENERIC 8
+#define PG_NR_MAX    16
 
 typedef void (*pg_gemm_micro_fn)(size_t k,
                                  const float *a, size_t lda,
@@ -30,24 +111,95 @@ typedef void (*pg_gemm_micro_fn)(size_t k,
                                  size_t m, size_t n);
 
 static pg_gemm_micro_fn g_cached_micro = NULL;
+static size_t g_cached_nr = 0;
 static int g_cpu_init_done = 0;
 
 static pg_gemm_micro_fn pg_pick_micro(void)
 {
     if (g_cached_micro) return g_cached_micro;
+#if defined(PG_ARCH_X86_64)
+    if (!g_cpu_init_done) {
+        __builtin_cpu_init();
+        g_cpu_init_done = 1;
+    }
+    if (__builtin_cpu_supports("avx512f")) {
+        g_cached_micro = sgemm_avx512_micro;
+        g_cached_nr = PG_NR_AVX512;
+    } else {
+        g_cached_micro = sgemm_avx2_micro;
+        g_cached_nr = PG_NR_AVX2;
+    }
+#elif defined(PG_ARCH_AARCH64)
+    // runtime SVE detection
+    int has_sve = 0;
+#if defined(PG_HAVE_SVE) || defined(__ARM_FEATURE_SVE)
+#if defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP);
+#ifdef HWCAP_SVE
+    if (hw & HWCAP_SVE) has_sve = 1;
+#endif
+#else
+#if defined(__GNUC__) && __GNUC__ >= 12
+    if (__builtin_cpu_supports("sve")) has_sve = 1;
+#endif
+#endif
+    if (has_sve) {
+        g_cached_micro = sgemm_sve_micro;
+        g_cached_nr = PG_NR_SVE;
+        return g_cached_micro;
+    }
+#endif
+    g_cached_micro = sgemm_neon_micro;
+    g_cached_nr = PG_NR_NEON;
+#elif defined(PG_ARCH_GENERIC)
+    g_cached_micro = sgemm_generic_micro;
+    g_cached_nr = PG_NR_GENERIC;
+#else
+// auto-detect fallback
 #if defined(__x86_64__) || defined(__i386__)
     if (!g_cpu_init_done) {
         __builtin_cpu_init();
         g_cpu_init_done = 1;
     }
-    if (__builtin_cpu_supports("avx512f"))
+    if (__builtin_cpu_supports("avx512f")) {
         g_cached_micro = sgemm_avx512_micro;
-    else
+        g_cached_nr = PG_NR_AVX512;
+    } else {
         g_cached_micro = sgemm_avx2_micro;
+        g_cached_nr = PG_NR_AVX2;
+    }
+#elif defined(__aarch64__)
+    int has_sve = 0;
+#if defined(PG_HAVE_SVE) || defined(__ARM_FEATURE_SVE)
+#if defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP);
+#ifdef HWCAP_SVE
+    if (hw & HWCAP_SVE) has_sve = 1;
+#endif
 #else
-    g_cached_micro = sgemm_avx2_micro;
+#if defined(__GNUC__) && __GNUC__ >= 12
+    if (__builtin_cpu_supports("sve")) has_sve = 1;
+#endif
+#endif
+    if (has_sve) {
+        g_cached_micro = sgemm_sve_micro;
+        g_cached_nr = PG_NR_SVE;
+        return g_cached_micro;
+    }
+#endif
+    g_cached_micro = sgemm_neon_micro;
+    g_cached_nr = PG_NR_NEON;
+#else
+    g_cached_micro = sgemm_generic_micro;
+    g_cached_nr = PG_NR_GENERIC;
+#endif
 #endif
     return g_cached_micro;
+}
+
+static inline size_t pg_pick_nr(void){
+    if (!g_cached_micro) pg_pick_micro();
+    return g_cached_nr;
 }
 
 typedef struct {
@@ -76,7 +228,7 @@ static void gemm_par_fn(void *ctx, size_t start, size_t end) {
     size_t lda = p->lda, ldb = p->ldb, ldc = p->ldc;
     // packing buffers (stack, 64B aligned)
     float packA[PG_MR * PG_KC] __attribute__((aligned(64)));
-    float packB[PG_KC * PG_NR_AVX512] __attribute__((aligned(64)));
+    float packB[PG_KC * PG_NR_MAX] __attribute__((aligned(64)));
     // start/end are block indices (each block = PG_MR rows)
     for (size_t bi = start; bi < end; bi++) {
         size_t i = bi * PG_MR;
@@ -130,7 +282,7 @@ static void pg_cpu_gemm_serial_packed(size_t m, size_t n, size_t k,
                   float *c, size_t ldc,
                   pg_gemm_micro_fn micro, size_t nr){
     float packA[PG_MR * PG_KC] __attribute__((aligned(64)));
-    float packB[PG_KC * PG_NR_AVX512] __attribute__((aligned(64)));
+    float packB[PG_KC * PG_NR_MAX] __attribute__((aligned(64)));
     for (size_t i = 0; i < m; i++) memset(c + i * ldc, 0, n * sizeof(float));
     for (size_t i = 0; i < m; i += PG_MR) {
         size_t mi = m - i < PG_MR ? m - i : PG_MR;
@@ -152,7 +304,7 @@ void pg_cpu_gemm(size_t m, size_t n, size_t k,
                   float *c, size_t ldc)
 {
     pg_gemm_micro_fn micro = pg_pick_micro();
-    size_t nr = micro == sgemm_avx512_micro ? PG_NR_AVX512 : PG_NR_AVX2;
+    size_t nr = pg_pick_nr();
 
     size_t total = m * n * k;
     int nthreads = pg_thread_pool_size();
@@ -255,7 +407,7 @@ void pg_cpu_gemm_fused(size_t m, size_t n, size_t k,
                   float *c, size_t ldc,
                   const float *bias, int act){
     pg_gemm_micro_fn micro=pg_pick_micro();
-    size_t nr=micro==sgemm_avx512_micro?PG_NR_AVX512:PG_NR_AVX2;
+    size_t nr=pg_pick_nr();
     size_t total=m*n*k;
     int nthreads=pg_thread_pool_size();
     if(nthreads<=1 || total < (1<<18) || m < 16){
