@@ -12,11 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__aarch64__) || defined(PG_ARCH_AARCH64)
+#if (defined(__aarch64__) || defined(PG_ARCH_AARCH64)) && defined(__linux__)
 #include <sys/auxv.h>
-#ifdef __linux__
 #include <asm/hwcap.h>
-#endif
 #endif
 
 #if defined(PG_ARCH_X86_64)
