@@ -144,3 +144,36 @@ jobs:
           make clean
           make -j$(nproc)
           make test
+
+  macos:
+    name: macos (metal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          cc --version
+          clang --version
+          xcode-select -p || true
+          xcrun --show-sdk-path || true
+          make --version
+
+      - name: Build (cpu)
+        run: |
+          make clean
+          make -j$(sysctl -n hw.logicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 3)
+
+      - name: Run tests (cpu)
+        run: make test
+
+      - name: Build BACKEND=metal
+        run: |
+          make clean
+          make -j$(sysctl -n hw.logicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 3) BACKEND=metal
+
+      - name: Run tests BACKEND=metal
+        run: make test BACKEND=metal
+
+      - name: Build examples BACKEND=metal
+        run: make examples BACKEND=metal -j$(sysctl -n hw.logicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 3)
