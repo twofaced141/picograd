@@ -110,8 +110,12 @@ endif
 ifeq ($(BACKEND),metal)
 CPPFLAGS += -DPICOGRAD_BACKEND_METAL
 SRC      += $(wildcard src/backend/metal/*.c)
+SRC      += $(wildcard src/backend/metal/*.m)
 ifeq ($(shell uname),Darwin)
 LDLIBS   += -framework Metal -framework Foundation -lobjc
+# metal.c contains Objective-C (Metal/Foundation imports, blocks, ARC).
+# Force clang to compile it as Objective-C on macOS.
+$(BUILD)/src/backend/metal/%.o: CFLAGS += -x objective-c -fobjc-arc -fblocks
 endif
 endif
 
