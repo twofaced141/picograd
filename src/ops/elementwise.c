@@ -281,8 +281,13 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
                 for (size_t i = 0; i < M; i++) {
                     const float *par = pa + i * N;
                     float *por = po + i * N;
-                    #pragma GCC ivdep
-                    for (size_t j = 0; j < N; j++) por[j] = f(par[j], pb[j]);
+                    if (f==fadd) simd_bin_add(par,pb,por,N);
+                    else if (f==fsub) simd_bin_sub(par,pb,por,N);
+                    else if (f==fmul) simd_bin_mul(par,pb,por,N);
+                    else if (f==fdiv) simd_bin_div(par,pb,por,N);
+                    else {
+#pragma GCC ivdep
+                    for (size_t j = 0; j < N; j++) por[j] = f(par[j], pb[j]); }
                 }
             } else {
                 row_bcast_t ctx={pa,pb,po,N,f};
@@ -302,14 +307,82 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
                 for (size_t i = 0; i < M; i++) {
                     const float *pbr = pb + i * N;
                     float *por = po + i * N;
-                    #pragma GCC ivdep
-                    for (size_t j = 0; j < N; j++) por[j] = f(pa[j], pbr[j]);
+                    if (f==fadd) simd_bin_add(pa,pbr,por,N);
+                    else if (f==fsub) simd_bin_sub(pa,pbr,por,N);
+                    else if (f==fmul) simd_bin_mul(pa,pbr,por,N);
+                    else if (f==fdiv) simd_bin_div(pa,pbr,por,N);
+                    else {
+#pragma GCC ivdep
+                    for (size_t j = 0; j < N; j++) por[j] = f(pa[j], pbr[j]); }
                 }
             } else {
                 row_bcast2_t ctx={pb,pa,po,N,f};
                 pg_parallel_for(M, 4, row_bcast2_fn, &ctx);
             }
             return out;
+        }
+    }
+    // Fast path ND last-dim broadcast (e.g., [B,*,N] + [N]) – covers batch+seq+hidden bias
+    if (ndim >= 2 && shape[ndim-1] > 1) {
+        size_t Nlast = shape[ndim-1];
+        size_t outer = out->numel / Nlast;
+        // a full, b bias (b numel == Nlast)
+        if (a->numel == out->numel && b->numel == Nlast && is_contiguous(a) && is_contiguous(b) && is_contiguous(out)) {
+            bool lead_match = (a->ndim == ndim);
+            if (lead_match) {
+                for (size_t d=0; d<ndim; ++d) if (a->shape[d] != shape[d]) { lead_match=false; break; }
+            }
+            if (lead_match) {
+                const float *pa = a->data;
+                const float *pb = b->data;
+                float *po = out->data;
+                if (outer * Nlast < 8192 || outer < 4) {
+                    for (size_t i=0;i<outer;i++) {
+                        const float *par = pa + i*Nlast;
+                        float *por = po + i*Nlast;
+                        if (f==fadd) simd_bin_add(par,pb,por,Nlast);
+                        else if (f==fsub) simd_bin_sub(par,pb,por,Nlast);
+                        else if (f==fmul) simd_bin_mul(par,pb,por,Nlast);
+                        else if (f==fdiv) simd_bin_div(par,pb,por,Nlast);
+                        else {
+#pragma GCC ivdep
+                        for (size_t j=0;j<Nlast;j++) por[j]=f(par[j], pb[j]); }
+                    }
+                } else {
+                    row_bcast_t ctx={pa,pb,po,Nlast,f};
+                    pg_parallel_for(outer, 4, row_bcast_fn, &ctx);
+                }
+                return out;
+            }
+        }
+        // b full, a bias
+        if (b->numel == out->numel && a->numel == Nlast && is_contiguous(b) && is_contiguous(a) && is_contiguous(out)) {
+            bool lead_match = (b->ndim == ndim);
+            if (lead_match) {
+                for (size_t d=0; d<ndim; ++d) if (b->shape[d] != shape[d]) { lead_match=false; break; }
+            }
+            if (lead_match) {
+                const float *pb = b->data;
+                const float *pa = a->data;
+                float *po = out->data;
+                if (outer * Nlast < 8192 || outer < 4) {
+                    for (size_t i=0;i<outer;i++) {
+                        const float *pbr = pb + i*Nlast;
+                        float *por = po + i*Nlast;
+                        if (f==fadd) simd_bin_add(pa,pbr,por,Nlast);
+                        else if (f==fsub) simd_bin_sub(pa,pbr,por,Nlast);
+                        else if (f==fmul) simd_bin_mul(pa,pbr,por,Nlast);
+                        else if (f==fdiv) simd_bin_div(pa,pbr,por,Nlast);
+                        else {
+#pragma GCC ivdep
+                        for (size_t j=0;j<Nlast;j++) por[j]=f(pa[j], pbr[j]); }
+                    }
+                } else {
+                    row_bcast2_t ctx={pb,pa,po,Nlast,f};
+                    pg_parallel_for(outer, 4, row_bcast2_fn, &ctx);
+                }
+                return out;
+            }
         }
     }
     size_t idx[PG_MAX_NDIM] = {0};

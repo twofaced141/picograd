@@ -137,6 +137,9 @@ int main(void)
         { "mkl 8x16",  NULL,              16 },
     };
     size_t n_cols = has_avx512 ? 4 : 2;
+    size_t n_cols_full = sizeof(kernels)/sizeof(kernels[0]);
+    int has_sve = 0; (void)has_sve;
+    (void)n_cols;
 #elif defined(PG_ARCH_AARCH64) || (!defined(PG_ARCH_X86_64) && !defined(PG_ARCH_GENERIC) && defined(__aarch64__))
 #if defined(__aarch64__) && defined(__linux__)
     int has_sve = 0;
@@ -183,6 +186,8 @@ int main(void)
         { "ours generic 8x16", sgemm_generic_micro, 16 },
     };
     size_t n_cols = sizeof(kernels)/sizeof(kernels[0]);
+    size_t n_cols_full = sizeof(kernels)/sizeof(kernels[0]);
+    int has_sve = 0; (void)has_sve; (void)n_cols;
 #endif
 
     float *a  = malloc(8 * 1024 * sizeof(float));
@@ -198,6 +203,9 @@ int main(void)
     printf("%6s", "K");
     for (size_t col=0; col<n_cols_full; col++) {
         if (!has_sve && strstr(kernels[col].name, "sve")) continue;
+#if defined(PG_ARCH_X86_64) || (!defined(PG_ARCH_AARCH64) && !defined(PG_ARCH_GENERIC) && (defined(__x86_64__)||defined(__i386__)))
+        if (!has_avx512 && strstr(kernels[col].name, "avx512")) continue;
+#endif
         printf(" %12s", kernels[col].name);
     }
     printf("\n");
@@ -206,6 +214,9 @@ int main(void)
         printf("%6zu", k);
         for (size_t col = 0; col < n_cols_full; col++) {
             if (!has_sve && strstr(kernels[col].name, "sve")) continue;
+#if defined(PG_ARCH_X86_64) || (!defined(PG_ARCH_AARCH64) && !defined(PG_ARCH_GENERIC) && (defined(__x86_64__)||defined(__i386__)))
+            if (!has_avx512 && strstr(kernels[col].name, "avx512")) continue;
+#endif
             g_fn = kernels[col].fn;
             g_nr = kernels[col].nr;
             double fl = 2.0 * 8.0 * g_nr * (double)k;
