@@ -139,13 +139,6 @@ static inline void pg_f32_to_f16_batch(uint16_t *dst, const float *src, size_t n
 }
 
 static inline void pg_f16_to_f32_batch(float *dst, const uint16_t *src, size_t n){
-#if defined(__F16C__)
-    size_t i=0;
-    // 8 at a time via _mm_cvtph_ps
-    #if defined(__AVX2__)
-    // use 256-bit if possible
-    #endif
-#endif
     pg_convert_f16_to_f32_scalar_batch(dst, src, n);
 }
 

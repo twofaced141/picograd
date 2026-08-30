@@ -12,7 +12,7 @@
 // Weights prepack in AMX format offline (not implemented here).
 
 bool pg_cpu_supports_amx_bf16(void){
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(__clang__)
     __builtin_cpu_init();
     return __builtin_cpu_supports("amx-bf16") && __builtin_cpu_supports("amx-tile");
 #else

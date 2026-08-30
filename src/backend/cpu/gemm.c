@@ -287,10 +287,12 @@ static pg_bgemm_micro_fn pg_pick_bmicro(size_t *out_nr){
     if (__builtin_cpu_supports("avx512bf16")) {
         if (bgemm_avx512bf16_micro) { g_cached_bmicro = bgemm_avx512bf16_micro; g_cached_bnr=32; *out_nr=32; return g_cached_bmicro; }
     }
-    // AMX-BF16 would be priority if available
+    // AMX-BF16 would be priority if available (clang lacks builtin strings)
+#if !defined(__clang__)
     if (__builtin_cpu_supports("amx-bf16") && __builtin_cpu_supports("amx-tile")) {
         // placeholder: if amx micro available would be selected
     }
+#endif
     if (bgemm_avx2_micro) { g_cached_bmicro = bgemm_avx2_micro; g_cached_bnr=PG_NR_AVX2; *out_nr=PG_NR_AVX2; return g_cached_bmicro; }
     g_cached_bmicro = bgemm_avx2_cvt_micro; g_cached_bnr=PG_NR_AVX2; *out_nr=PG_NR_AVX2; return g_cached_bmicro;
 #elif defined(PG_ARCH_AARCH64)
