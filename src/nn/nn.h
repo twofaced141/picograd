@@ -17,6 +17,43 @@ void pg_linear_free(pg_linear *layer);
 pg_tensor *pg_linear_forward(const pg_linear *layer, const pg_tensor *x);
 pg_tensor *pg_linear_forward_relu(const pg_linear *layer, const pg_tensor *x);
 
+/* ---- Autograd Linear (pg_node based) ---- */
+typedef struct {
+    size_t in_features;
+    size_t out_features;
+    pg_node *weight; // [in, out]
+    pg_node *bias;   // [out]
+} pg_ag_linear;
+
+pg_ag_linear *pg_ag_linear_new(size_t in_features, size_t out_features);
+void pg_ag_linear_free(pg_ag_linear *layer);
+pg_node *pg_ag_linear_forward(const pg_ag_linear *layer, pg_node *x);
+size_t pg_ag_linear_register(pg_module *m, const pg_ag_linear *l);
+
+/* ---- Sequential (autograd) ---- */
+typedef enum {
+    PG_SEQ_LINEAR = 0,
+    PG_SEQ_RELU,
+    PG_SEQ_TANH,
+    PG_SEQ_SIGMOID,
+    PG_SEQ_GELU,
+    PG_SEQ_DROPOUT,
+    PG_SEQ_LAYERNORM,
+    PG_SEQ_BATCHNORM
+} pg_seq_kind_t;
+
+typedef struct pg_sequential pg_sequential;
+
+pg_sequential *pg_sequential_new(void);
+void pg_sequential_free(pg_sequential *seq);
+int pg_sequential_add_linear(pg_sequential *seq, size_t in, size_t out);
+int pg_sequential_add_activation(pg_sequential *seq, pg_seq_kind_t kind);
+int pg_sequential_add_dropout(pg_sequential *seq, float p);
+pg_node *pg_sequential_forward(pg_sequential *seq, pg_node *x, bool training);
+size_t pg_sequential_num_params(pg_sequential *seq);
+int pg_sequential_register(pg_module *m, pg_sequential *seq);
+size_t pg_sequential_depth(pg_sequential *seq);
+
 /* ---- Conv2d (NCHW). Parameters stored as autograd leaf nodes. ---- */
 typedef struct {
     size_t in_channels, out_channels;

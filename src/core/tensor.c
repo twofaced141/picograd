@@ -549,3 +549,111 @@ void pg_tensor_print(const pg_tensor *t, FILE *out)
     print_rec(t, 0, 0, out);
     fputc('\n', out);
 }
+
+// ---- serialization ----
+#define PG_TENSOR_MAGIC "PGT1"
+#define PG_TENSOR_VERSION 1
+
+bool pg_tensor_save_fp(const pg_tensor *t, FILE *fp){
+    if(!t || !t->data_raw || !fp) return false;
+    // header: magic 4 + version 4 + dtype 4 + ndim 4 + shape[ndim] *8 + numel 8 + elem_size 8 + nbytes 8
+    if(fwrite(PG_TENSOR_MAGIC, 1, 4, fp) != 4) return false;
+    uint32_t ver = PG_TENSOR_VERSION;
+    if(fwrite(&ver, 4, 1, fp) != 1) return false;
+    uint32_t dtype = (uint32_t)t->dtype;
+    if(fwrite(&dtype, 4, 1, fp) != 1) return false;
+    uint32_t ndim = (uint32_t)t->ndim;
+    if(fwrite(&ndim, 4, 1, fp) != 1) return false;
+    for(size_t i=0;i<t->ndim;i++){
+        uint64_t d = (uint64_t)t->shape[i];
+        if(fwrite(&d, 8, 1, fp) != 1) return false;
+    }
+    uint64_t numel = (uint64_t)t->numel;
+    if(fwrite(&numel, 8, 1, fp) != 1) return false;
+    uint64_t elem = (uint64_t)t->elem_size;
+    if(fwrite(&elem, 8, 1, fp) != 1) return false;
+    size_t nbytes = t->numel * t->elem_size;
+    // ensure contiguous for save: copy logically contiguous data in row-major order
+    // If tensor is contiguous we can dump raw, else iterate.
+    bool contig = true;
+    size_t acc=1;
+    for(size_t i=t->ndim;i-- >0;){
+        if(t->stride[i]!=acc) { contig=false; break; }
+        acc*=t->shape[i];
+    }
+    if(contig){
+        if(nbytes && fwrite(t->data_raw, 1, nbytes, fp) != nbytes) return false;
+    } else {
+        // fallback: materialize contiguous buffer and write
+        // iterate via odometer and write elements in logical order as packed
+        size_t idx[PG_MAX_NDIM]={0};
+        for(size_t p=0;p<t->numel;p++){
+            size_t off=0;
+            for(size_t d=0;d<t->ndim;d++) off += idx[d]*t->stride[d];
+            if(fwrite((char*)t->data_raw + off*t->elem_size, t->elem_size, 1, fp) != 1) return false;
+            for(size_t d=t->ndim; d-- >0;){
+                idx[d]++;
+                if(idx[d] < t->shape[d]) break;
+                idx[d]=0;
+            }
+        }
+    }
+    return true;
+}
+
+bool pg_tensor_save(const pg_tensor *t, const char *path){
+    if(!path) return false;
+    FILE *fp = fopen(path, "wb");
+    if(!fp) return false;
+    bool ok = pg_tensor_save_fp(t, fp);
+    fclose(fp);
+    return ok;
+}
+
+pg_tensor *pg_tensor_load_fp(FILE *fp){
+    if(!fp) return NULL;
+    char magic[4];
+    if(fread(magic, 1, 4, fp) != 4) return NULL;
+    if(memcmp(magic, PG_TENSOR_MAGIC, 4) != 0) return NULL;
+    uint32_t ver=0, dtype_u=0, ndim_u=0;
+    if(fread(&ver, 4, 1, fp) != 1) return NULL;
+    if(ver != PG_TENSOR_VERSION) return NULL;
+    if(fread(&dtype_u, 4, 1, fp) != 1) return NULL;
+    if(fread(&ndim_u, 4, 1, fp) != 1) return NULL;
+    if(ndim_u==0 || ndim_u>PG_MAX_NDIM) return NULL;
+    pg_dtype dtype = (pg_dtype)dtype_u;
+    if(dtype >= PG_DTYPE_COUNT) return NULL;
+    size_t ndim = (size_t)ndim_u;
+    size_t shape[PG_MAX_NDIM]={0};
+    for(size_t i=0;i<ndim;i++){
+        uint64_t d=0;
+        if(fread(&d, 8, 1, fp) != 1) return NULL;
+        if(d==0 || d > 10000000) return NULL; // sanity
+        shape[i]=(size_t)d;
+    }
+    uint64_t numel_u=0, elem_u=0;
+    if(fread(&numel_u, 8, 1, fp) != 1) return NULL;
+    if(fread(&elem_u, 8, 1, fp) != 1) return NULL;
+    size_t expected = pg_shape_numel(ndim, shape);
+    if(expected != (size_t)numel_u) return NULL;
+    if(pg_dtype_size(dtype) != (size_t)elem_u) return NULL;
+    pg_tensor *t = pg_tensor_empty_dtype(dtype, ndim, shape);
+    if(!t) return NULL;
+    size_t nbytes = t->numel * t->elem_size;
+    if(nbytes){
+        if(fread(t->data_raw, 1, nbytes, fp) != nbytes){
+            pg_tensor_free(t);
+            return NULL;
+        }
+    }
+    return t;
+}
+
+pg_tensor *pg_tensor_load(const char *path){
+    if(!path) return NULL;
+    FILE *fp = fopen(path, "rb");
+    if(!fp) return NULL;
+    pg_tensor *t = pg_tensor_load_fp(fp);
+    fclose(fp);
+    return t;
+}

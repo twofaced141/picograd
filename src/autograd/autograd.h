@@ -44,6 +44,7 @@ typedef enum {
     PG_AG_OP_GELU,
     PG_AG_OP_LEAKY_RELU,
     PG_AG_OP_ERF,
+    PG_AG_OP_BATCHNORM,
     PG_AG_OP_COUNT
 } pg_ag_op_t;
 
@@ -122,6 +123,10 @@ pg_node *pg_ag_transpose(pg_node *a, size_t axis0, size_t axis1);
 
 pg_node *pg_ag_layernorm(pg_node *x, pg_node *weight, pg_node *bias, float eps);
 pg_node *pg_ag_rmsnorm(pg_node *x, pg_node *weight, float eps);
+pg_node *pg_ag_batchnorm(pg_node *x, pg_node *weight, pg_node *bias, float eps);
+pg_node *pg_ag_batchnorm2d(pg_node *x, pg_node *weight, pg_node *bias,
+                           pg_tensor *running_mean, pg_tensor *running_var,
+                           float eps, float momentum, bool training);
 
 /* ---- extra nn layers (training) ---- */
 /* NCHW 2D convolution. x:[N,Cin,H,W], w:[Cout,Cin,kh,kw], b:[Cout] (may be NULL). */
@@ -148,6 +153,16 @@ pg_node *pg_ag_mse(pg_node *pred, pg_node *target, bool mean);
 pg_node *pg_ag_bce_with_logits(pg_node *logits, const float *targets, size_t n, bool mean);
 
 void pg_backward(pg_node *loss);
+
+// detach / no_grad
+pg_node *pg_node_detach(pg_node *n);
+bool pg_autograd_is_grad_enabled(void);
+void pg_autograd_set_grad_enabled(bool enabled);
+void pg_no_grad_push(void);
+void pg_no_grad_pop(void);
+// helper macros
+#define PG_NO_GRAD_BEGIN do{ pg_no_grad_push(); }while(0)
+#define PG_NO_GRAD_END do{ pg_no_grad_pop(); }while(0)
 
 /* ---- JIT autograd ---- */
 void pg_autograd_set_jit(bool enabled);

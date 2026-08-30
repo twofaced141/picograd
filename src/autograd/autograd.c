@@ -28,6 +28,15 @@ static char g_ag_last_err[512] = {0};
 static bool g_ag_last_was_jit = false;
 static size_t g_ag_jit_hits = 0, g_ag_jit_fallbacks = 0;
 
+/* ---- grad enabled / no_grad ---- */
+static bool g_grad_enabled = true;
+static int g_no_grad_depth = 0;
+
+bool pg_autograd_is_grad_enabled(void){ return g_grad_enabled && g_no_grad_depth==0; }
+void pg_autograd_set_grad_enabled(bool enabled){ g_grad_enabled = enabled; }
+void pg_no_grad_push(void){ g_no_grad_depth++; }
+void pg_no_grad_pop(void){ if(g_no_grad_depth>0) g_no_grad_depth--; }
+
 static void ag_set_err(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -70,6 +79,13 @@ static pg_node *node_wrap(pg_tensor *t, bool requires_grad)
 static pg_node *attach(pg_tensor *value, size_t nparents, pg_node **parents,
                        void (*backward)(pg_node *), void *ctx, pg_ag_op_t ag_op)
 {
+    // no_grad mode: create detached node, no graph
+    if(!pg_autograd_is_grad_enabled()){
+        free(ctx);
+        pg_node *n = node_wrap(value, false);
+        // do not retain parents, no backward
+        return n;
+    }
     pg_node *n = calloc(1, sizeof(*n));
     if (!n) {
         pg_tensor_free(value);
@@ -96,6 +112,7 @@ static pg_node *attach(pg_tensor *value, size_t nparents, pg_node **parents,
             n->requires_grad |= parents[i]->requires_grad;
         }
         n->nparents = nparents;
+        if(!n->requires_grad){ n->backward=NULL; free(ctx); n->ctx=NULL; }
     }
     return n;
 }
@@ -107,6 +124,13 @@ static pg_node *var_leaf(size_t ndim, const size_t *shape, bool requires_grad,
     if (!t)
         return NULL;
     return node_wrap(t, requires_grad);
+}
+
+pg_node *pg_node_detach(pg_node *n){
+    if(!n || !n->value) return NULL;
+    pg_tensor *t = pg_tensor_clone(n->value);
+    if(!t) return NULL;
+    return node_wrap(t, false);
 }
 
 pg_node *pg_var_from_data(size_t ndim, const size_t *shape, const float *data,
@@ -1174,6 +1198,206 @@ pg_node *pg_ag_rmsnorm(pg_node *x, pg_node *weight, float eps){
     pg_node *r=attach(v, npar, pars, bwd_rmsnorm, cx, PG_AG_OP_RMSNORM);
     if(!r) free(cx);
     return r;
+}
+
+// ---------- batchnorm ----------
+typedef struct { float eps; size_t C; size_t perChannel; float *mean; float *invStd; bool has_w; bool has_b; } bn_ctx_t;
+
+static void bwd_batchnorm(pg_node *n){
+    bn_ctx_t *cx = (bn_ctx_t*)n->ctx;
+    size_t C = cx->C;
+    size_t perCh = cx->perChannel;
+    float *mean = cx->mean;
+    float *invStd = cx->invStd;
+    pg_node *px = n->parents[0];
+    pg_node *pw = cx->has_w ? n->parents[1] : NULL;
+    pg_node *pb = cx->has_b ? n->parents[cx->has_w ? 2 : 1] : NULL;
+    const pg_tensor *x = px->value;
+    const pg_tensor *g = n->grad;
+    size_t ndim = x->ndim;
+
+    // precompute inv per channel sums if needed
+    // For weight/bias grads we need sum over perChannel
+    if(pw && pw->requires_grad){
+        ensure_grad(pw);
+        // need to accumulate grad for weight: sum g * x_hat
+        // compute per channel sums
+        double *sum_g_xhat = calloc(C, sizeof(double));
+        if(sum_g_xhat){
+            size_t idx[PG_MAX_NDIM]={0};
+            size_t off_x=0, off_g=0;
+            for(size_t p=0;p<x->numel;p++){
+                size_t c = idx[1];
+                float xhat = (x->data[off_x] - mean[c]) * invStd[c];
+                sum_g_xhat[c] += (double)g->data[off_g] * (double)xhat;
+                for(size_t d=ndim; d-- >0;){
+                    idx[d]++;
+                    off_x += x->stride[d];
+                    off_g += g->stride[d];
+                    if(idx[d] < x->shape[d]) break;
+                    idx[d]=0;
+                    off_x -= x->stride[d] * x->shape[d];
+                    off_g -= g->stride[d] * g->shape[d];
+                }
+            }
+            for(size_t c=0;c<C;c++) pw->grad->data[c] += (float)sum_g_xhat[c];
+            free(sum_g_xhat);
+        }
+    }
+    if(pb && pb->requires_grad){
+        ensure_grad(pb);
+        double *sum_g = calloc(C, sizeof(double));
+        if(sum_g){
+            size_t idx[PG_MAX_NDIM]={0};
+            size_t off_g=0;
+            for(size_t p=0;p<g->numel;p++){
+                size_t c = idx[1];
+                sum_g[c] += (double)g->data[off_g];
+                for(size_t d=ndim; d-- >0;){
+                    idx[d]++;
+                    off_g += g->stride[d];
+                    if(idx[d] < x->shape[d]) break;
+                    idx[d]=0;
+                    off_g -= g->stride[d] * g->shape[d];
+                }
+            }
+            for(size_t c=0;c<C;c++) pb->grad->data[c] += (float)sum_g[c];
+            free(sum_g);
+        }
+    }
+    if(!px->requires_grad) return;
+    ensure_grad(px);
+    // Compute per-channel sums needed for dx: mean(g) and mean(g*x_hat)
+    double *sum_g = calloc(C, sizeof(double));
+    double *sum_g_xhat = calloc(C, sizeof(double));
+    if(!sum_g || !sum_g_xhat){ free(sum_g); free(sum_g_xhat); return; }
+    size_t idx[PG_MAX_NDIM]={0};
+    size_t off_x=0, off_g=0;
+    for(size_t p=0;p<x->numel;p++){
+        size_t c = idx[1];
+        float xhat = (x->data[off_x] - mean[c]) * invStd[c];
+        double gv = (double)g->data[off_g];
+        sum_g[c] += gv;
+        sum_g_xhat[c] += gv * (double)xhat;
+        for(size_t d=ndim; d-- >0;){
+            idx[d]++;
+            off_x += x->stride[d];
+            off_g += g->stride[d];
+            if(idx[d] < x->shape[d]) break;
+            idx[d]=0;
+            off_x -= x->stride[d] * x->shape[d];
+            off_g -= g->stride[d] * g->shape[d];
+        }
+    }
+    // second pass: compute grad_x
+    const float *w = (pw && pw->value) ? pw->value->data : NULL;
+    float *gx = px->grad->data;
+    memset(idx,0,sizeof(idx));
+    off_x=0; off_g=0;
+    size_t off_gx=0;
+    // need gx stride (same as x likely)
+    // we use px->grad stride which matches x shape
+    for(size_t p=0;p<x->numel;p++){
+        size_t c = idx[1];
+        float xhat = (x->data[off_x] - mean[c]) * invStd[c];
+        float gv = g->data[off_g];
+        float mean_g = (float)(sum_g[c] / (double)perCh);
+        float mean_gx = (float)(sum_g_xhat[c] / (double)perCh);
+        float gamma = w ? w[c] : 1.0f;
+        float dx = gamma * invStd[c] * (gv - mean_g - xhat * mean_gx);
+        gx[off_gx] += dx;
+        for(size_t d=ndim; d-- >0;){
+            idx[d]++;
+            off_x += x->stride[d];
+            off_g += g->stride[d];
+            off_gx += px->grad->stride[d];
+            if(idx[d] < x->shape[d]) break;
+            idx[d]=0;
+            off_x -= x->stride[d] * x->shape[d];
+            off_g -= g->stride[d] * g->shape[d];
+            off_gx -= px->grad->stride[d] * x->shape[d];
+        }
+    }
+    free(sum_g);
+    free(sum_g_xhat);
+}
+
+pg_node *pg_ag_batchnorm2d(pg_node *x, pg_node *weight, pg_node *bias,
+                           pg_tensor *running_mean, pg_tensor *running_var,
+                           float eps, float momentum, bool training){
+    assert(x && x->value);
+    pg_tensor *v = pg_batchnorm2d(x->value, weight?weight->value:NULL, bias?bias->value:NULL,
+                                  running_mean, running_var, eps, momentum, training);
+    if(!v) return NULL;
+    size_t C = x->value->shape[1];
+    size_t perCh = x->value->numel / C;
+    // Capture mean/invStd used for backward (if training, batch stats; else running)
+    bn_ctx_t *cx = malloc(sizeof(*cx) + 2*C*sizeof(float));
+    if(!cx){ pg_tensor_free(v); return NULL; }
+    cx->eps = eps;
+    cx->C = C;
+    cx->perChannel = perCh;
+    cx->has_w = weight != NULL;
+    cx->has_b = bias != NULL;
+    cx->mean = (float*)((char*)cx + sizeof(*cx));
+    cx->invStd = cx->mean + C;
+    if(training){
+        // compute mean/invStd again for ctx (or copy from forward logic)
+        // Recompute quickly to avoid storing forward intermediates
+        double *mean_d = calloc(C, sizeof(double));
+        double *var_d = calloc(C, sizeof(double));
+        if(!mean_d || !var_d){ free(mean_d); free(var_d); free(cx); pg_tensor_free(v); return NULL; }
+        size_t idx[PG_MAX_NDIM]={0};
+        size_t off=0;
+        for(size_t p=0;p<x->value->numel;p++){
+            size_t c = idx[1];
+            mean_d[c] += (double)x->value->data[off];
+            for(size_t d=x->value->ndim; d-- >0;){
+                idx[d]++;
+                off += x->value->stride[d];
+                if(idx[d] < x->value->shape[d]) break;
+                idx[d]=0;
+                off -= x->value->stride[d] * x->value->shape[d];
+            }
+        }
+        for(size_t c=0;c<C;c++) mean_d[c] /= (double)perCh;
+        memset(idx,0,sizeof(idx));
+        off=0;
+        for(size_t p=0;p<x->value->numel;p++){
+            size_t c = idx[1];
+            double d = (double)x->value->data[off] - mean_d[c];
+            var_d[c] += d*d;
+            for(size_t d2=x->value->ndim; d2-- >0;){
+                idx[d2]++;
+                off += x->value->stride[d2];
+                if(idx[d2] < x->value->shape[d2]) break;
+                idx[d2]=0;
+                off -= x->value->stride[d2] * x->value->shape[d2];
+            }
+        }
+        for(size_t c=0;c<C;c++){
+            var_d[c] /= (double)perCh;
+            cx->mean[c] = (float)mean_d[c];
+            cx->invStd[c] = 1.0f / sqrtf((float)var_d[c] + eps);
+        }
+        free(mean_d); free(var_d);
+    } else {
+        // inference: use running stats
+        for(size_t c=0;c<C;c++){
+            cx->mean[c] = running_mean->data[c];
+            cx->invStd[c] = 1.0f / sqrtf(running_var->data[c] + eps);
+        }
+    }
+    size_t npar = 1 + (weight?1:0) + (bias?1:0);
+    pg_node *pars[3]; size_t pi=0; pars[pi++]=x; if(weight) pars[pi++]=weight; if(bias) pars[pi++]=bias;
+    // For inference mode, we still need grad for x/weight/bias if training=false but requires_grad, use same formula with running stats
+    pg_node *r = attach(v, npar, pars, bwd_batchnorm, cx, PG_AG_OP_BATCHNORM);
+    if(!r) free(cx);
+    return r;
+}
+
+pg_node *pg_ag_batchnorm(pg_node *x, pg_node *weight, pg_node *bias, float eps){
+    return pg_ag_batchnorm2d(x, weight, bias, NULL, NULL, eps, 0.1f, true);
 }
 
 // ---------- conv2d / embedding / dropout ----------

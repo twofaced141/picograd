@@ -83,6 +83,13 @@ pg_tensor *pg_tensor_view(const pg_tensor *src);
 pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_t *shape);
 pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order);
 
+// serialization (binary checkpoint: magic "PGT1" + header + raw bytes)
+bool pg_tensor_save(const pg_tensor *t, const char *path);
+pg_tensor *pg_tensor_load(const char *path);
+// file handle variants
+bool pg_tensor_save_fp(const pg_tensor *t, FILE *fp);
+pg_tensor *pg_tensor_load_fp(FILE *fp);
+
 // buffer pool (aligned 64B)
 void pg_tensor_pool_clear(void);
 size_t pg_tensor_pool_size(void);
