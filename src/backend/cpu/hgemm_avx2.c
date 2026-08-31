@@ -13,7 +13,14 @@ void hgemm_avx2_micro_c(size_t k, const uint16_t *a, size_t lda,
     // use vector path when F16C available
     if (m>8 || n>8) {
         // fallback to generic for oversize
-        for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+        for (size_t i = 0; i < m; i++) {
+            for (size_t j = 0; j < n; j++) {
+                float acc = c[i * ldc + j];
+                for (size_t p = 0; p < k; p++)
+                    acc += pg_f16_to_f32_scalar(a[i * lda + p]) * pg_f16_to_f32_scalar(b[p * ldb + j]);
+                c[i * ldc + j] = acc;
+            }
+        }
         return;
     }
     // simple vectorized for 8x8 case; otherwise generic
@@ -51,6 +58,13 @@ void hgemm_avx2_micro_c(size_t k, const uint16_t *a, size_t lda,
     return;
 #else
     // scalar fallback
-    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+    for (size_t i = 0; i < m; i++) {
+        for (size_t j = 0; j < n; j++) {
+            float acc = c[i * ldc + j];
+            for (size_t p = 0; p < k; p++)
+                acc += pg_f16_to_f32_scalar(a[i * lda + p]) * pg_f16_to_f32_scalar(b[p * ldb + j]);
+            c[i * ldc + j] = acc;
+        }
+    }
 #endif
 }

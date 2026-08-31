@@ -27,7 +27,13 @@ void amx_bgemm_micro(size_t k, const uint16_t *a, size_t lda,
     if(m==16 && n==16 && k==32 && pg_cpu_supports_amx_bf16()){
         // AMX tile config: 16x32 BF16 A, 32x16 BF16 B, 16x16 FP32 C
         // Palette 1, 1KB tiles (16 rows *64 bytes)
-        struct __tile_config { uint8_t palette_id; uint8_t start_row; uint8_t reserved[14]; uint16_t colsb[8]; uint8_t rows[8]; } cfg={0};
+        struct __tile_config {
+            uint8_t palette_id;
+            uint8_t start_row;
+            uint8_t reserved[14];
+            uint16_t colsb[8];
+            uint8_t rows[8];
+        } cfg = {0};
         cfg.palette_id=1;
         cfg.colsb[0]=64; cfg.rows[0]=16; // C f32 16x16
         cfg.colsb[1]=64; cfg.rows[1]=16; // A bf16 16x32
@@ -42,15 +48,29 @@ void amx_bgemm_micro(size_t k, const uint16_t *a, size_t lda,
         return;
     }
 #endif
-    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_bf16_to_f32_scalar(a[i*lda+p])*pg_bf16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+    for (size_t i = 0; i < m; i++) {
+        for (size_t j = 0; j < n; j++) {
+            float acc = c[i * ldc + j];
+            for (size_t p = 0; p < k; p++)
+                acc += pg_bf16_to_f32_scalar(a[i * lda + p]) * pg_bf16_to_f32_scalar(b[p * ldb + j]);
+            c[i * ldc + j] = acc;
+        }
+    }
 }
 
 void bgemm_amx_micro(size_t k, const uint16_t *a, size_t lda,
                      const uint16_t *b, size_t ldb,
                      float *c, size_t ldc, size_t m, size_t n){
-    if (pg_cpu_supports_amx_bf16()){
-        amx_bgemm_micro(k,a,lda,b,ldb,c,ldc,m,n);
+    if (pg_cpu_supports_amx_bf16()) {
+        amx_bgemm_micro(k, a, lda, b, ldb, c, ldc, m, n);
     } else {
-        for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_bf16_to_f32_scalar(a[i*lda+p])*pg_bf16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+        for (size_t i = 0; i < m; i++) {
+            for (size_t j = 0; j < n; j++) {
+                float acc = c[i * ldc + j];
+                for (size_t p = 0; p < k; p++)
+                    acc += pg_bf16_to_f32_scalar(a[i * lda + p]) * pg_bf16_to_f32_scalar(b[p * ldb + j]);
+                c[i * ldc + j] = acc;
+            }
+        }
     }
 }

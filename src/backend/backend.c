@@ -164,8 +164,14 @@ void pg_gemm_ex(pg_dtype dtype,
     if (o->gemm_ex) {
         if (o->gemm_ex(dtype,m,n,k,a,lda,b,ldb,c,ldc)==PG_OK) return;
     }
-    if (dtype==PG_DTYPE_F16 && o->hgemm) { o->hgemm(m,n,k,(const uint16_t*)a,lda,(const uint16_t*)b,ldb,c,ldc); return; }
-    if (dtype==PG_DTYPE_BF16 && o->bgemm) { o->bgemm(m,n,k,(const uint16_t*)a,lda,(const uint16_t*)b,ldb,c,ldc); return; }
+    if (dtype == PG_DTYPE_F16 && o->hgemm) {
+        o->hgemm(m, n, k, (const uint16_t *)a, lda, (const uint16_t *)b, ldb, c, ldc);
+        return;
+    }
+    if (dtype == PG_DTYPE_BF16 && o->bgemm) {
+        o->bgemm(m, n, k, (const uint16_t *)a, lda, (const uint16_t *)b, ldb, c, ldc);
+        return;
+    }
     // fallback to cpu mixed-precision
     pg_cpu_gemm_ex(dtype,m,n,k,a,lda,b,ldb,c,ldc);
 }

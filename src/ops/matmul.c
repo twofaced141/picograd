@@ -265,8 +265,10 @@ pg_tensor *pg_matmul(const pg_tensor *a, const pg_tensor *b)
         const void *pb = (char*)b->data_raw + ob * b->elem_size;
         float *pc = (float*)out->data_raw + s * am * bn;
         // ld* are in elements (not bytes) per spec
-        if (dt==PG_DTYPE_F32) pg_gemm(am, bn, ak, (const float*)pa, lda_a, (const float*)pb, ldb_b, pc, bn);
-        else pg_gemm_ex(dt, am, bn, ak, pa, lda_a, pb, ldb_b, pc, bn);
+        if (dt == PG_DTYPE_F32)
+            pg_gemm(am, bn, ak, (const float *)pa, lda_a, (const float *)pb, ldb_b, pc, bn);
+        else
+            pg_gemm_ex(dt, am, bn, ak, pa, lda_a, pb, ldb_b, pc, bn);
         for (size_t d = bnd; d-- > 0;) {
             midx[d]++;
             oa += sa_bat[d];

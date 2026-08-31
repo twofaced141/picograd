@@ -11,20 +11,36 @@
 #include <string.h>
 
 typedef struct { float *d; float (*f)(float); } act_map_par_t;
-static void act_map_par_fn(void *ctx, size_t s, size_t e){ act_map_par_t *p=ctx; float *d=p->d; float (*ff)(float)=p->f; for(size_t i=s;i<e;i++) d[i]=ff(d[i]); }
+static void act_map_par_fn(void *ctx, size_t s, size_t e){
+    act_map_par_t *p = ctx;
+    float *d = p->d;
+    float (*ff)(float) = p->f;
+    for (size_t i = s; i < e; i++)
+        d[i] = ff(d[i]);
+}
 
 typedef struct { const float *src; float *dst; size_t len; bool log; } sm1_par_t;
 static void sm1_par_fn(void *ctx, size_t s, size_t e){
-    sm1_par_t *p=ctx;
-    for(size_t o=s;o<e;o++){
-        const float *srow=p->src+o*p->len;
-        float *drow=p->dst+o*p->len;
-        float m=srow[0];
-        for(size_t j=1;j<p->len;j++) if(srow[j]>m) m=srow[j];
-        float s=0.0f;
-        for(size_t j=0;j<p->len;j++) s+=expf(srow[j]-m);
-        if(p->log){ float ls=logf(s); for(size_t j=0;j<p->len;j++) drow[j]=srow[j]-m-ls; }
-        else { float inv=1.0f/s; for(size_t j=0;j<p->len;j++) drow[j]=expf(srow[j]-m)*inv; }
+    sm1_par_t *p = ctx;
+    for (size_t o = s; o < e; o++) {
+        const float *srow = p->src + o * p->len;
+        float *drow = p->dst + o * p->len;
+        float m = srow[0];
+        for (size_t j = 1; j < p->len; j++)
+            if (srow[j] > m)
+                m = srow[j];
+        float s = 0.0f;
+        for (size_t j = 0; j < p->len; j++)
+            s += expf(srow[j] - m);
+        if (p->log) {
+            float ls = logf(s);
+            for (size_t j = 0; j < p->len; j++)
+                drow[j] = srow[j] - m - ls;
+        } else {
+            float inv = 1.0f / s;
+            for (size_t j = 0; j < p->len; j++)
+                drow[j] = expf(srow[j] - m) * inv;
+        }
     }
 }
 
@@ -97,15 +113,25 @@ static pg_tensor *try_map_gpu_act(const pg_tensor *a, int op)
 static float fsigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 static float fgelu(float x) { return 0.5f * x * (1.0f + erff(x * 0.70710678118f)); }
 
-static inline void relu_simd(float *d, size_t n){ simd_relu(d,n); }
-static inline void leaky_simd(float *d, size_t n, float alpha){ simd_leaky_relu(d,n,alpha); }
+static inline void relu_simd(float *d, size_t n) {
+    simd_relu(d, n);
+}
+static inline void leaky_simd(float *d, size_t n, float alpha) {
+    simd_leaky_relu(d, n, alpha);
+}
 // compat aliases for previous avx names
 #define relu_avx relu_simd
 #define leaky_avx leaky_simd
 typedef struct { float *d; } relu_par_t;
-static void relu_par_fn(void *ctx, size_t s, size_t e){ relu_par_t *p=(relu_par_t*)ctx; relu_simd(p->d + s, e - s); }
+static void relu_par_fn(void *ctx, size_t s, size_t e) {
+    relu_par_t *p = (relu_par_t*)ctx;
+    relu_simd(p->d + s, e - s);
+}
 typedef struct { float *d; float alpha; } leaky_par2_t;
-static void leaky_par2_fn(void *ctx, size_t s, size_t e){ leaky_par2_t *p=(leaky_par2_t*)ctx; leaky_simd(p->d + s, e - s, p->alpha); }
+static void leaky_par2_fn(void *ctx, size_t s, size_t e) {
+    leaky_par2_t *p = (leaky_par2_t*)ctx;
+    leaky_simd(p->d + s, e - s, p->alpha);
+}
 
 pg_tensor *pg_relu(const pg_tensor *a)
 {
@@ -113,10 +139,13 @@ pg_tensor *pg_relu(const pg_tensor *a)
     if (g) return g;
     pg_tensor *r = pg_tensor_clone(a);
     if(!r) return NULL;
-    float *pr=r->data; size_t n=r->numel;
-    if(n < 65536){
-        if(n >= 32) simd_relu(pr,n);
-        else { for(size_t i=0;i<n;i++) pr[i]= pr[i]>0?pr[i]:0; }
+    float *pr = r->data;
+    size_t n = r->numel;
+    if (n < 65536) {
+        if (n >= 32) simd_relu(pr, n);
+        else {
+            for (size_t i = 0; i < n; i++) pr[i] = pr[i] > 0 ? pr[i] : 0;
+        }
     } else {
         relu_par_t ctx={pr};
         pg_parallel_for(n, 65536, relu_par_fn, &ctx);

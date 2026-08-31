@@ -452,7 +452,8 @@ static void bwd_mul(pg_node *n)
     // fast path: all same shape contiguous
     if (pa->requires_grad && pg_shape_equal(pa->value->ndim, pa->value->shape, g->ndim, g->shape) &&
         pg_shape_equal(pb->value->ndim, pb->value->shape, g->ndim, g->shape) &&
-        ag_is_contiguous(pa->value) && ag_is_contiguous(pb->value) && ag_is_contiguous(g) && ag_is_contiguous(pa->grad ? pa->grad : pa->value)) {
+        ag_is_contiguous(pa->value) && ag_is_contiguous(pb->value) &&
+        ag_is_contiguous(g) && ag_is_contiguous(pa->grad ? pa->grad : pa->value)) {
         // direct without alloc if pa grad already allocated or can be ensured
         if (pa->grad || pa->requires_grad) {
             ensure_grad(pa);
@@ -536,8 +537,16 @@ static float grad_log(float x, size_t idx)      { (void)idx; return 1.0f / x; }
 static float grad_sqrt(float x, size_t idx)     { (void)idx; return 0.5f / sqrtf(x); }
 static float grad_sin(float x, size_t idx)      { (void)idx; return cosf(x); }
 static float grad_cos(float x, size_t idx)      { (void)idx; return -sinf(x); }
-static float grad_sigmoid(float x, size_t idx)   { (void)idx; { float s = 1.0f / (1.0f + expf(-x)); return s * (1.0f - s); } }
-static float grad_tanh(float x, size_t idx)     { (void)idx; { float t = tanhf(x); return 1.0f - t * t; } }
+static float grad_sigmoid(float x, size_t idx) {
+    (void)idx;
+    float s = 1.0f / (1.0f + expf(-x));
+    return s * (1.0f - s);
+}
+static float grad_tanh(float x, size_t idx) {
+    (void)idx;
+    float t = tanhf(x);
+    return 1.0f - t * t;
+}
 static float grad_relu_local(float x, size_t idx) { (void)idx; return x > 0.0f ? 1.0f : 0.0f; }
 
 static void bwd_exp(pg_node *n)  { bwd_unary_elemwise(n, grad_exp); }
@@ -777,7 +786,10 @@ UNARY_OP(pg_ag_relu, pg_relu, bwd_relu, PG_AG_OP_RELU)
 UNARY_OP(pg_ag_sigmoid, pg_sigmoid, bwd_sigmoid, PG_AG_OP_SIGMOID)
 UNARY_OP(pg_ag_tanh, pg_tanh, bwd_tanh, PG_AG_OP_TANH)
 
-static float grad_abs(float x, size_t idx) { (void)idx; return x > 0 ? 1.0f : (x < 0 ? -1.0f : 0.0f); }
+static float grad_abs(float x, size_t idx) {
+    (void)idx;
+    return x > 0 ? 1.0f : (x < 0 ? -1.0f : 0.0f);
+}
 static float grad_erf(float x, size_t idx) { (void)idx; return 1.12837916709551f * expf(-x*x); }
 static float grad_gelu(float x, size_t idx) {
     (void)idx;
@@ -1179,7 +1191,11 @@ pg_node *pg_ag_layernorm(pg_node *x, pg_node *weight, pg_node *bias, float eps){
     cx->has_w = weight != NULL;
     cx->has_b = bias != NULL;
     size_t npar = 1 + (weight?1:0) + (bias?1:0);
-    pg_node *pars[3]; size_t idx=0; pars[idx++]=x; if(weight) pars[idx++]=weight; if(bias) pars[idx++]=bias;
+    pg_node *pars[3];
+    size_t idx = 0;
+    pars[idx++] = x;
+    if (weight) pars[idx++] = weight;
+    if (bias) pars[idx++] = bias;
     pg_node *r=attach(v, npar, pars, bwd_layernorm, cx, PG_AG_OP_LAYERNORM);
     if(!r) free(cx);
     return r;
@@ -1201,7 +1217,15 @@ pg_node *pg_ag_rmsnorm(pg_node *x, pg_node *weight, float eps){
 }
 
 // ---------- batchnorm ----------
-typedef struct { float eps; size_t C; size_t perChannel; float *mean; float *invStd; bool has_w; bool has_b; } bn_ctx_t;
+typedef struct {
+    float eps;
+    size_t C;
+    size_t perChannel;
+    float *mean;
+    float *invStd;
+    bool has_w;
+    bool has_b;
+} bn_ctx_t;
 
 static void bwd_batchnorm(pg_node *n){
     bn_ctx_t *cx = (bn_ctx_t*)n->ctx;
@@ -1346,7 +1370,13 @@ pg_node *pg_ag_batchnorm2d(pg_node *x, pg_node *weight, pg_node *bias,
         // Recompute quickly to avoid storing forward intermediates
         double *mean_d = calloc(C, sizeof(double));
         double *var_d = calloc(C, sizeof(double));
-        if(!mean_d || !var_d){ free(mean_d); free(var_d); free(cx); pg_tensor_free(v); return NULL; }
+        if (!mean_d || !var_d) {
+            free(mean_d);
+            free(var_d);
+            free(cx);
+            pg_tensor_free(v);
+            return NULL;
+        }
         size_t idx[PG_MAX_NDIM]={0};
         size_t off=0;
         for(size_t p=0;p<x->value->numel;p++){
@@ -1389,7 +1419,11 @@ pg_node *pg_ag_batchnorm2d(pg_node *x, pg_node *weight, pg_node *bias,
         }
     }
     size_t npar = 1 + (weight?1:0) + (bias?1:0);
-    pg_node *pars[3]; size_t pi=0; pars[pi++]=x; if(weight) pars[pi++]=weight; if(bias) pars[pi++]=bias;
+    pg_node *pars[3];
+    size_t pi = 0;
+    pars[pi++] = x;
+    if (weight) pars[pi++] = weight;
+    if (bias) pars[pi++] = bias;
     // For inference mode, we still need grad for x/weight/bias if training=false but requires_grad, use same formula with running stats
     pg_node *r = attach(v, npar, pars, bwd_batchnorm, cx, PG_AG_OP_BATCHNORM);
     if(!r) free(cx);
@@ -1945,7 +1979,10 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
         prefix_nodes[n_prefix++] = eff_loss;
         if (eff_loss->ag_op == PG_AG_OP_MEAN) {
             red_ctx *rc = (red_ctx*)eff_loss->ctx;
-            if (!eff_loss->nparents || !eff_loss->parents[0] || !eff_loss->parents[0]->value) { ag_set_err("mean parent missing"); return false; }
+            if (!eff_loss->nparents || !eff_loss->parents[0] || !eff_loss->parents[0]->value) {
+                ag_set_err("mean parent missing");
+                return false;
+            }
             size_t axis = rc->axis;
             if (axis >= eff_loss->parents[0]->value->ndim) { ag_set_err("mean axis oob"); return false; }
             size_t dim = eff_loss->parents[0]->value->shape[axis];
@@ -1974,9 +2011,19 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
     /* find suffix of elementwise ops with same loop_shape reachable from eff_loss */
     bool *in_suffix = calloc(order->n, sizeof(bool));
     int *queue = malloc(order->n * sizeof(int));
-    if (!in_suffix || !queue) { free(in_suffix); free(queue); ag_set_err("oom suffix"); return false; }
+    if (!in_suffix || !queue) {
+        free(in_suffix);
+        free(queue);
+        ag_set_err("oom suffix");
+        return false;
+    }
     int eff_idx = find_order_idx(order, eff_loss);
-    if (eff_idx < 0) { free(in_suffix); free(queue); ag_set_err("eff idx not found"); return false; }
+    if (eff_idx < 0) {
+        free(in_suffix);
+        free(queue);
+        ag_set_err("eff idx not found");
+        return false;
+    }
     size_t qh=0, qt=0;
     queue[qt++] = eff_idx;
     in_suffix[eff_idx]=true;
@@ -1991,23 +2038,32 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
             pg_node *pn = order->items[p_idx];
             if (pn->ag_op == PG_AG_OP_NONE) continue;
             if (!ag_op_is_jit_elementwise(pn->ag_op)) continue;
-            if (pn->value->ndim != loop_ndim || pn->value->numel != loop_numel || !pg_shape_equal(pn->value->ndim, pn->value->shape, loop_ndim, loop_shape)) continue;
+            if (pn->value->ndim != loop_ndim || pn->value->numel != loop_numel ||
+                !pg_shape_equal(pn->value->ndim, pn->value->shape, loop_ndim, loop_shape))
+                continue;
             in_suffix[p_idx]=true;
             queue[qt++]=p_idx;
         }
     }
     free(queue);
     /* count suffix nodes */
-    size_t n_suffix=0;
-    for (size_t i=0;i<order->n;i++) if(in_suffix[i]) n_suffix++;
-    if (n_suffix==0) { free(in_suffix); ag_set_err("no suffix"); return false; }
+    size_t n_suffix = 0;
+    for (size_t i = 0; i < order->n; i++) if (in_suffix[i]) n_suffix++;
+    if (n_suffix == 0) {
+        free(in_suffix);
+        ag_set_err("no suffix");
+        return false;
+    }
 
     /* check that all suffix nodes have same loop_shape and needed parent values have same shape */
-    for (size_t i=0;i<order->n;i++) if(in_suffix[i]) {
+    for (size_t i = 0; i < order->n; i++) if (in_suffix[i]) {
         pg_node *n = order->items[i];
-        if (n->value->ndim != loop_ndim || n->value->numel != loop_numel || !pg_shape_equal(n->value->ndim, n->value->shape, loop_ndim, loop_shape)) {
-            free(in_suffix); ag_set_err("suffix shape mismatch"); return false;
-        }
+        if (n->value->ndim != loop_ndim || n->value->numel != loop_numel ||
+            !pg_shape_equal(n->value->ndim, n->value->shape, loop_ndim, loop_shape)) {
+                free(in_suffix);
+                ag_set_err("suffix shape mismatch");
+                return false;
+            }
         for (size_t pi=0; pi<n->nparents; pi++) {
             if (!ag_needs_val_for_parent(n->ag_op, pi)) continue;
             pg_node *par = n->parents[pi];
@@ -2048,16 +2104,38 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
 
     size_t n_out=0;
     for (size_t i=0;i<order->n;i++) if(is_suffix_output[i]) n_out++;
-    if (n_out==0) { free(in_suffix); free(is_suffix_output); ag_set_err("no suffix outputs"); return false; }
-    if (n_out>16) { free(in_suffix); free(is_suffix_output); ag_set_err("too many suffix outputs"); return false; }
+    if (n_out == 0) {
+        free(in_suffix);
+        free(is_suffix_output);
+        ag_set_err("no suffix outputs");
+        return false;
+    }
+    if (n_out > 16) {
+        free(in_suffix);
+        free(is_suffix_output);
+        ag_set_err("too many suffix outputs");
+        return false;
+    }
 
     pg_jit_graph *jg = pg_jit_graph_new();
-    if (!jg) { free(in_suffix); free(is_suffix_output); ag_set_err("jg alloc fail"); return false; }
+    if (!jg) {
+        free(in_suffix);
+        free(is_suffix_output);
+        ag_set_err("jg alloc fail");
+        return false;
+    }
 
     val_map_t *val_maps = NULL;
     size_t n_val_maps = 0, cap_val_maps = 0;
     int *grad_jit_id = calloc(order->n, sizeof(int));
-    if (!grad_jit_id) { pg_jit_graph_free(jg); free(in_suffix); free(is_suffix_output); free(val_maps); ag_set_err("oom grad map"); return false; }
+    if (!grad_jit_id) {
+        pg_jit_graph_free(jg);
+        free(in_suffix);
+        free(is_suffix_output);
+        free(val_maps);
+        ag_set_err("oom grad map");
+        return false;
+    }
     for (size_t i = 0; i < order->n; i++) grad_jit_id[i] = -1;
 
     pg_tensor *g_eff_tensor = NULL;
@@ -2116,7 +2194,13 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
                 case PG_AG_OP_ADD: { contrib = g_child; break; }
                 case PG_AG_OP_SUB: {
                     if (pi == 0) contrib = g_child;
-                    else { contrib = pg_jit_neg(jg, g_child); if (contrib < 0) { ag_set_err("neg fail"); goto jit_fail; } }
+                    else {
+                        contrib = pg_jit_neg(jg, g_child);
+                        if (contrib < 0) {
+                            ag_set_err("neg fail");
+                            goto jit_fail;
+                        }
+                    }
                     break;
                 }
                 case PG_AG_OP_MUL: {
@@ -2131,7 +2215,12 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
                         int vb = val_b; if (vb < 0) { ag_set_err("div vb missing"); goto jit_fail; }
                         contrib = pg_jit_div(jg, g_child, vb); if (contrib < 0) { ag_set_err("div fail"); goto jit_fail; }
                     } else {
-                        int va = val_a; int vb = val_b; if (va < 0 || vb < 0) { ag_set_err("div vals missing"); goto jit_fail; }
+                        int va = val_a;
+                        int vb = val_b;
+                        if (va < 0 || vb < 0) {
+                            ag_set_err("div vals missing");
+                            goto jit_fail;
+                        }
                         int vb2 = pg_jit_mul(jg, vb, vb); if (vb2 < 0) goto jit_fail;
                         int num = pg_jit_mul(jg, g_child, va); if (num < 0) goto jit_fail;
                         int div_tmp = pg_jit_div(jg, num, vb2); if (div_tmp < 0) goto jit_fail;
@@ -2139,7 +2228,11 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
                     }
                     break;
                 }
-                case PG_AG_OP_NEG: { contrib = pg_jit_neg(jg, g_child); if (contrib < 0) goto jit_fail; break; }
+                case PG_AG_OP_NEG: {
+                    contrib = pg_jit_neg(jg, g_child);
+                    if (contrib < 0) goto jit_fail;
+                    break;
+                }
                 case PG_AG_OP_EXP: {
                     if (val_a < 0) { ag_set_err("exp val missing"); goto jit_fail; }
                     int exp_a = pg_jit_exp(jg, val_a); if (exp_a < 0) goto jit_fail;
@@ -2281,7 +2374,12 @@ static bool try_jit_backward_internal_ex(pg_node *loss, node_vec *order, bool re
             if (is_prefix) continue;
             pg_node *nn = order->items[i];
             if (nn->ag_op==PG_AG_OP_NONE) continue;
-            if (!in_suffix[i]) { ag_set_err("not all nodes in suffix for full"); free(in_suffix); free(is_suffix_output); return false; }
+            if (!in_suffix[i]) {
+                ag_set_err("not all nodes in suffix for full");
+                free(in_suffix);
+                free(is_suffix_output);
+                return false;
+            }
         }
         free(in_suffix);
         free(is_suffix_output);
@@ -2333,7 +2431,17 @@ static bool try_jit_suffix(pg_node *loss, node_vec *order, bool **out_handled) {
     size_t loop_numel = eff_loss->value->numel;
     bool *in_suffix = calloc(order->n, sizeof(bool));
     int *queue = malloc(order->n * sizeof(int));
-    if (!in_suffix || !queue) { free(in_suffix); free(queue); bool *h = calloc(order->n,sizeof(bool)); if (!h && order->n != 0) { *out_handled = NULL; return true; } *out_handled = h; return true; }
+    if (!in_suffix || !queue) {
+        free(in_suffix);
+        free(queue);
+        bool *h = calloc(order->n, sizeof(bool));
+        if (!h && order->n != 0) {
+            *out_handled = NULL;
+            return true;
+        }
+        *out_handled = h;
+        return true;
+    }
     int eff_idx = find_order_idx(order, eff_loss);
     if (eff_idx>=0) {
         size_t qh=0, qt=0;
@@ -2349,7 +2457,9 @@ static bool try_jit_suffix(pg_node *loss, node_vec *order, bool **out_handled) {
                 pg_node *pn = order->items[p_idx];
                 if(pn->ag_op==PG_AG_OP_NONE) continue;
                 if(!ag_op_is_jit_elementwise(pn->ag_op)) continue;
-                if(pn->value->ndim != loop_ndim || pn->value->numel != loop_numel || !pg_shape_equal(pn->value->ndim, pn->value->shape, loop_ndim, loop_shape)) continue;
+                if (pn->value->ndim != loop_ndim || pn->value->numel != loop_numel ||
+                    !pg_shape_equal(pn->value->ndim, pn->value->shape, loop_ndim, loop_shape))
+                    continue;
                 in_suffix[p_idx]=true;
                 queue[qt++]=p_idx;
             }

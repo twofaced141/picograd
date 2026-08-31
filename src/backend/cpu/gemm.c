@@ -257,35 +257,74 @@ static inline size_t pg_pick_nr(void){
 
 // ---- mixed pickers ----
 static pg_hgemm_micro_fn pg_pick_hmicro(size_t *out_nr){
-    if (g_cached_hmicro) { *out_nr=g_cached_hnr; return g_cached_hmicro; }
+    if (g_cached_hmicro) {
+        *out_nr = g_cached_hnr;
+        return g_cached_hmicro;
+    }
 #if defined(PG_ARCH_X86_64) || (!defined(PG_ARCH_AARCH64) && !defined(PG_ARCH_GENERIC) && (defined(__x86_64__)||defined(__i386__)))
-    if (!g_cpu_init_done) { __builtin_cpu_init(); g_cpu_init_done=1; }
+    if (!g_cpu_init_done) {
+        __builtin_cpu_init();
+        g_cpu_init_done = 1;
+    }
     // priority: AMX > AVX512FP16 > AVX2 cvt > generic
     // AMX detection requires amx-tile and amx-bf16 support; we currently provide no AMX micro, so skip
 #ifdef __AMX_BF16__
     // placeholder for amx_bf16 check – would require tile config
 #endif
     if (__builtin_cpu_supports("avx512fp16")) {
-        if (hgemm_avx512fp16_micro) { g_cached_hmicro = hgemm_avx512fp16_micro; g_cached_hnr=32; *out_nr=32; return g_cached_hmicro; }
+        if (hgemm_avx512fp16_micro) {
+            g_cached_hmicro = hgemm_avx512fp16_micro;
+            g_cached_hnr = 32;
+            *out_nr = 32;
+            return g_cached_hmicro;
+        }
     }
     // AVX2 fallback
-    if (hgemm_avx2_micro) { g_cached_hmicro = hgemm_avx2_micro; g_cached_hnr=PG_NR_AVX2; *out_nr=PG_NR_AVX2; return g_cached_hmicro; }
+    if (hgemm_avx2_micro) {
+        g_cached_hmicro = hgemm_avx2_micro;
+        g_cached_hnr = PG_NR_AVX2;
+        *out_nr = PG_NR_AVX2;
+        return g_cached_hmicro;
+    }
     // our internal AVX2 cvt wrapper (still generic speed)
-    g_cached_hmicro = hgemm_avx2_cvt_micro; g_cached_hnr=PG_NR_AVX2; *out_nr=PG_NR_AVX2; return g_cached_hmicro;
+    g_cached_hmicro = hgemm_avx2_cvt_micro;
+    g_cached_hnr = PG_NR_AVX2;
+    *out_nr = PG_NR_AVX2;
+    return g_cached_hmicro;
 #elif defined(PG_ARCH_AARCH64) || (defined(__aarch64__) && !defined(PG_ARCH_X86_64) && !defined(PG_ARCH_GENERIC))
     // ARM NEON fp16 -> future, fallback generic
-    g_cached_hmicro = hgemm_generic_micro; g_cached_hnr=PG_NR_NEON; *out_nr=PG_NR_NEON; return g_cached_hmicro;
+    g_cached_hmicro = hgemm_generic_micro;
+    g_cached_hnr = PG_NR_NEON;
+    *out_nr = PG_NR_NEON;
+    return g_cached_hmicro;
 #else
-    g_cached_hmicro = hgemm_generic_micro; g_cached_hnr=PG_NR_GENERIC; *out_nr=PG_NR_GENERIC; return g_cached_hmicro;
+    g_cached_hmicro = hgemm_generic_micro;
+    g_cached_hnr = PG_NR_GENERIC;
+    *out_nr = PG_NR_GENERIC;
+    return g_cached_hmicro;
 #endif
-    g_cached_hmicro = hgemm_generic_micro; g_cached_hnr=PG_NR_GENERIC; *out_nr=PG_NR_GENERIC; return g_cached_hmicro;
+    g_cached_hmicro = hgemm_generic_micro;
+    g_cached_hnr = PG_NR_GENERIC;
+    *out_nr = PG_NR_GENERIC;
+    return g_cached_hmicro;
 }
 static pg_bgemm_micro_fn pg_pick_bmicro(size_t *out_nr){
-    if (g_cached_bmicro) { *out_nr=g_cached_bnr; return g_cached_bmicro; }
+    if (g_cached_bmicro) {
+        *out_nr = g_cached_bnr;
+        return g_cached_bmicro;
+    }
 #if defined(PG_ARCH_X86_64) || (!defined(PG_ARCH_AARCH64) && !defined(PG_ARCH_GENERIC) && (defined(__x86_64__)||defined(__i386__)))
-    if (!g_cpu_init_done) { __builtin_cpu_init(); g_cpu_init_done=1; }
+    if (!g_cpu_init_done) {
+        __builtin_cpu_init();
+        g_cpu_init_done = 1;
+    }
     if (__builtin_cpu_supports("avx512bf16")) {
-        if (bgemm_avx512bf16_micro) { g_cached_bmicro = bgemm_avx512bf16_micro; g_cached_bnr=32; *out_nr=32; return g_cached_bmicro; }
+        if (bgemm_avx512bf16_micro) {
+            g_cached_bmicro = bgemm_avx512bf16_micro;
+            g_cached_bnr = 32;
+            *out_nr = 32;
+            return g_cached_bmicro;
+        }
     }
     // AMX-BF16 would be priority if available (clang lacks builtin strings)
 #if !defined(__clang__)
@@ -293,14 +332,31 @@ static pg_bgemm_micro_fn pg_pick_bmicro(size_t *out_nr){
         // placeholder: if amx micro available would be selected
     }
 #endif
-    if (bgemm_avx2_micro) { g_cached_bmicro = bgemm_avx2_micro; g_cached_bnr=PG_NR_AVX2; *out_nr=PG_NR_AVX2; return g_cached_bmicro; }
-    g_cached_bmicro = bgemm_avx2_cvt_micro; g_cached_bnr=PG_NR_AVX2; *out_nr=PG_NR_AVX2; return g_cached_bmicro;
+    if (bgemm_avx2_micro) {
+        g_cached_bmicro = bgemm_avx2_micro;
+        g_cached_bnr = PG_NR_AVX2;
+        *out_nr = PG_NR_AVX2;
+        return g_cached_bmicro;
+    }
+    g_cached_bmicro = bgemm_avx2_cvt_micro;
+    g_cached_bnr = PG_NR_AVX2;
+    *out_nr = PG_NR_AVX2;
+    return g_cached_bmicro;
 #elif defined(PG_ARCH_AARCH64)
-    g_cached_bmicro = bgemm_generic_micro; g_cached_bnr=PG_NR_NEON; *out_nr=PG_NR_NEON; return g_cached_bmicro;
+    g_cached_bmicro = bgemm_generic_micro;
+    g_cached_bnr = PG_NR_NEON;
+    *out_nr = PG_NR_NEON;
+    return g_cached_bmicro;
 #else
-    g_cached_bmicro = bgemm_generic_micro; g_cached_bnr=PG_NR_GENERIC; *out_nr=PG_NR_GENERIC; return g_cached_bmicro;
+    g_cached_bmicro = bgemm_generic_micro;
+    g_cached_bnr = PG_NR_GENERIC;
+    *out_nr = PG_NR_GENERIC;
+    return g_cached_bmicro;
 #endif
-    g_cached_bmicro = bgemm_generic_micro; g_cached_bnr=PG_NR_GENERIC; *out_nr=PG_NR_GENERIC; return g_cached_bmicro;
+    g_cached_bmicro = bgemm_generic_micro;
+    g_cached_bnr = PG_NR_GENERIC;
+    *out_nr = PG_NR_GENERIC;
+    return g_cached_bmicro;
 }
 
 typedef struct {
@@ -579,7 +635,15 @@ static inline float act_apply(float x, int act){
     return x;
 }
 
-typedef struct { size_t m,n,k; const float *a,*b,*bias; float *c; size_t lda,ldb,ldc; int act; pg_gemm_micro_fn micro; size_t nr; } gemm_fused_t;
+typedef struct {
+    size_t m, n, k;
+    const float *a, *b, *bias;
+    float *c;
+    size_t lda, ldb, ldc;
+    int act;
+    pg_gemm_micro_fn micro;
+    size_t nr;
+} gemm_fused_t;
 
 static void gemm_fused_par(void *ctx, size_t start, size_t end){
     gemm_fused_t *p=ctx;
@@ -630,8 +694,14 @@ void pg_cpu_gemm_fused(size_t m, size_t n, size_t k,
     if(nthreads<=1 || total < (1<<18) || m < 16){
         for(size_t i=0;i<m;i+=PG_MR){
             size_t mi=m - i < PG_MR ? m - i : PG_MR;
-            if(bias){ for(size_t ii=0;ii<mi;ii++){ float*crow=c+(i+ii)*ldc; for(size_t j=0;j<n;j++) crow[j]=bias[j]; } }
-            else { for(size_t ii=0;ii<mi;ii++) memset(c+(i+ii)*ldc,0,n*sizeof(float)); }
+            if (bias) {
+                for (size_t ii = 0; ii < mi; ii++) {
+                    float *crow = c + (i + ii) * ldc;
+                    for (size_t j = 0; j < n; j++) crow[j] = bias[j];
+                }
+            } else {
+                for (size_t ii = 0; ii < mi; ii++) memset(c + (i + ii) * ldc, 0, n * sizeof(float));
+            }
             for(size_t kk=0;kk<k;kk+=PG_KC){
                 size_t kl=k - kk < PG_KC ? k - kk : PG_KC;
                 for(size_t j=0;j<n;j+=nr){
@@ -656,7 +726,15 @@ void pg_cpu_gemm_fused(size_t m, size_t n, size_t k,
 }
 
 // fused ex for mixed: bias f32 + act after f32 accum (plan: pg_cpu_gemm_fused:402 дублировать для bias+act)
-typedef struct { size_t m,n,k; const void *a,*b; const float *bias; float *c; size_t lda,ldb,ldc; int act; pg_dtype dtype; } gemm_fused_ex_t;
+typedef struct {
+    size_t m, n, k;
+    const void *a, *b;
+    const float *bias;
+    float *c;
+    size_t lda, ldb, ldc;
+    int act;
+    pg_dtype dtype;
+} gemm_fused_ex_t;
 
 static void gemm_fused_ex_par(void *ctx, size_t start, size_t end){
     gemm_fused_ex_t *p=ctx;
@@ -667,8 +745,11 @@ static void gemm_fused_ex_par(void *ctx, size_t start, size_t end){
     for(size_t bi=start; bi<end; ++bi){
         size_t i=bi*PG_MR; if(i>=m) break;
         size_t mi=m - i < PG_MR ? m - i : PG_MR;
-        if(bias){
-            for(size_t ii=0; ii<mi; ++ii){ float*crow=c + (i+ii)*ldc; for(size_t j=0;j<n;j++) crow[j]=bias[j]; }
+        if (bias) {
+            for (size_t ii = 0; ii < mi; ++ii) {
+                float *crow = c + (i + ii) * ldc;
+                for (size_t j = 0; j < n; j++) crow[j] = bias[j];
+            }
         } else {
             for(size_t ii=0; ii<mi; ++ii) memset(c + (i+ii)*ldc, 0, n*sizeof(float));
         }

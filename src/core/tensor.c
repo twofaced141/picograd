@@ -11,7 +11,12 @@
 #include <string.h>
 
 typedef struct { float *d; float v; } fill_par_t;
-static void fill_par_fn(void *ctx, size_t s, size_t e){ fill_par_t *p=ctx; float *d=p->d; float v=p->v; for(size_t i=s;i<e;i++) d[i]=v; }
+static void fill_par_fn(void *ctx, size_t s, size_t e) {
+    fill_par_t *p = ctx;
+    float *d = p->d;
+    float v = p->v;
+    for (size_t i = s; i < e; i++) d[i] = v;
+}
 
 /* ---------- aligned pool ---------- */
 #define PG_POOL_MAX_COUNT 64
@@ -45,8 +50,16 @@ static void *pool_acquire(size_t nbytes) {
     pool_entry_t **best_pp = NULL;
     size_t best_sz = SIZE_MAX;
     while (cur) {
-        if (cur->nbytes == nbytes) { best = cur; best_pp = pp; break; }
-        if (cur->nbytes >= nbytes && cur->nbytes < best_sz) { best = cur; best_pp = pp; best_sz = cur->nbytes; }
+        if (cur->nbytes == nbytes) {
+            best = cur;
+            best_pp = pp;
+            break;
+        }
+        if (cur->nbytes >= nbytes && cur->nbytes < best_sz) {
+            best = cur;
+            best_pp = pp;
+            best_sz = cur->nbytes;
+        }
         pp = &cur->next;
         cur = cur->next;
     }
@@ -90,8 +103,20 @@ void pg_tensor_pool_clear(void) {
     g_pool_head = NULL; g_pool_count = 0; g_pool_bytes = 0;
     pthread_mutex_unlock(&g_pool_mu);
 }
-size_t pg_tensor_pool_size(void) { size_t c; pthread_mutex_lock(&g_pool_mu); c=g_pool_count; pthread_mutex_unlock(&g_pool_mu); return c; }
-size_t pg_tensor_pool_bytes(void) { size_t b; pthread_mutex_lock(&g_pool_mu); b=g_pool_bytes; pthread_mutex_unlock(&g_pool_mu); return b; }
+size_t pg_tensor_pool_size(void) {
+    size_t c;
+    pthread_mutex_lock(&g_pool_mu);
+    c = g_pool_count;
+    pthread_mutex_unlock(&g_pool_mu);
+    return c;
+}
+size_t pg_tensor_pool_bytes(void) {
+    size_t b;
+    pthread_mutex_lock(&g_pool_mu);
+    b = g_pool_bytes;
+    pthread_mutex_unlock(&g_pool_mu);
+    return b;
+}
 
 static pg_data_ref *data_ref_create(void *ptr, size_t nbytes) {
     pg_data_ref *r = (pg_data_ref*)malloc(sizeof(*r));
@@ -454,12 +479,20 @@ bool pg_tensor_allclose(const pg_tensor *a, const pg_tensor *b, float rtol, floa
         // compare as float
         for (size_t i = 0; i < a->numel; i++) {
             float av, bv;
-            if (a->dtype==PG_DTYPE_F32) av=a->data[i];
-            else if (a->dtype==PG_DTYPE_F16) av=pg_f16_to_f32_scalar(a->data_u16[i]);
-            else av=pg_bf16_to_f32_scalar(a->data_u16[i]);
-            if (b->dtype==PG_DTYPE_F32) bv=b->data[i];
-            else if (b->dtype==PG_DTYPE_F16) bv=pg_f16_to_f32_scalar(b->data_u16[i]);
-            else bv=pg_bf16_to_f32_scalar(b->data_u16[i]);
+            if (a->dtype == PG_DTYPE_F32) {
+                av = a->data[i];
+            } else if (a->dtype == PG_DTYPE_F16) {
+                av = pg_f16_to_f32_scalar(a->data_u16[i]);
+            } else {
+                av = pg_bf16_to_f32_scalar(a->data_u16[i]);
+            }
+            if (b->dtype == PG_DTYPE_F32) {
+                bv = b->data[i];
+            } else if (b->dtype == PG_DTYPE_F16) {
+                bv = pg_f16_to_f32_scalar(b->data_u16[i]);
+            } else {
+                bv = pg_bf16_to_f32_scalar(b->data_u16[i]);
+            }
             float diff = fabsf(av - bv);
             if (!(diff <= atol + rtol * fabsf(bv)))
                 return false;
@@ -476,8 +509,10 @@ bool pg_tensor_allclose(const pg_tensor *a, const pg_tensor *b, float rtol, floa
     }
     // f16/bf16: convert to float for comparison
     for (size_t i = 0; i < a->numel; i++) {
-        float av = (a->dtype==PG_DTYPE_F16)? pg_f16_to_f32_scalar(a->data_u16[i]) : pg_bf16_to_f32_scalar(a->data_u16[i]);
-        float bv = (b->dtype==PG_DTYPE_F16)? pg_f16_to_f32_scalar(b->data_u16[i]) : pg_bf16_to_f32_scalar(b->data_u16[i]);
+        float av = (a->dtype == PG_DTYPE_F16) ? pg_f16_to_f32_scalar(a->data_u16[i])
+                                                : pg_bf16_to_f32_scalar(a->data_u16[i]);
+        float bv = (b->dtype == PG_DTYPE_F16) ? pg_f16_to_f32_scalar(b->data_u16[i])
+                                                : pg_bf16_to_f32_scalar(b->data_u16[i]);
         float diff = fabsf(av - bv);
         if (!(diff <= atol + rtol * fabsf(bv))) return false;
     }
@@ -490,9 +525,13 @@ static void print_rec(const pg_tensor *t, size_t dim, size_t offset, FILE *out)
     if (dim == t->ndim - 1) {
         for (size_t i = 0; i < t->shape[dim]; i++) {
             float v;
-            if (t->dtype==PG_DTYPE_F32) v=t->data[offset + i];
-            else if (t->dtype==PG_DTYPE_F16) v=pg_f16_to_f32_scalar(t->data_u16[offset+i]);
-            else v=pg_bf16_to_f32_scalar(t->data_u16[offset+i]);
+            if (t->dtype == PG_DTYPE_F32) {
+                v = t->data[offset + i];
+            } else if (t->dtype == PG_DTYPE_F16) {
+                v = pg_f16_to_f32_scalar(t->data_u16[offset + i]);
+            } else {
+                v = pg_bf16_to_f32_scalar(t->data_u16[offset + i]);
+            }
             fprintf(out, i ? ", %g" : "%g", v);
         }
     } else {
@@ -517,29 +556,41 @@ pg_tensor *pg_tensor_view(const pg_tensor *src) {
 }
 pg_tensor *pg_tensor_reshape_view(const pg_tensor *src, size_t ndim, const size_t *shape) {
     if (!src || !src->data_raw || !valid_shape(ndim, shape)) return NULL;
-    size_t numel = 1; for (size_t i=0;i<ndim;i++) numel*=shape[i];
+    size_t numel = 1;
+    for (size_t i = 0; i < ndim; i++) numel *= shape[i];
     if (numel != src->numel) return NULL;
     // only allow reshape view if src is contiguous (row-major)
-    size_t acc=1; for(size_t i=src->ndim;i-- >0;){ if(src->stride[i]!=acc) return NULL; acc*=src->shape[i]; }
+    size_t acc = 1;
+    for (size_t i = src->ndim; i-- > 0;) {
+        if (src->stride[i] != acc) return NULL;
+        acc *= src->shape[i];
+    }
     pg_tensor *v = pg_tensor_view(src);
     if (!v) return NULL;
     v->ndim = ndim;
-    memcpy(v->shape, shape, ndim*sizeof(size_t));
+    memcpy(v->shape, shape, ndim * sizeof(size_t));
     compute_strides(ndim, shape, v->stride);
     return v;
 }
 pg_tensor *pg_tensor_permute_view(const pg_tensor *src, const size_t *order) {
     if (!src || !src->data_raw || !order) return NULL;
-    for(size_t i=0;i<src->ndim;i++) if(order[i]>=src->ndim) return NULL;
+    for (size_t i = 0; i < src->ndim; i++)
+        if (order[i] >= src->ndim) return NULL;
     // check permutation is bijection
-    bool seen[PG_MAX_NDIM]={0};
-    for(size_t i=0;i<src->ndim;i++){ if(seen[order[i]]) return NULL; seen[order[i]]=true; }
+    bool seen[PG_MAX_NDIM] = {0};
+    for (size_t i = 0; i < src->ndim; i++) {
+        if (seen[order[i]]) return NULL;
+        seen[order[i]] = true;
+    }
     pg_tensor *v = pg_tensor_view(src);
     if (!v) return NULL;
     size_t nshape[PG_MAX_NDIM], nstride[PG_MAX_NDIM];
-    for(size_t i=0;i<src->ndim;i++){ nshape[i]=src->shape[order[i]]; nstride[i]=src->stride[order[i]]; }
-    memcpy(v->shape, nshape, src->ndim*sizeof(size_t));
-    memcpy(v->stride, nstride, src->ndim*sizeof(size_t));
+    for (size_t i = 0; i < src->ndim; i++) {
+        nshape[i] = src->shape[order[i]];
+        nstride[i] = src->stride[order[i]];
+    }
+    memcpy(v->shape, nshape, src->ndim * sizeof(size_t));
+    memcpy(v->stride, nstride, src->ndim * sizeof(size_t));
     return v;
 }
 
@@ -587,10 +638,11 @@ bool pg_tensor_save_fp(const pg_tensor *t, FILE *fp){
         // fallback: materialize contiguous buffer and write
         // iterate via odometer and write elements in logical order as packed
         size_t idx[PG_MAX_NDIM]={0};
-        for(size_t p=0;p<t->numel;p++){
-            size_t off=0;
-            for(size_t d=0;d<t->ndim;d++) off += idx[d]*t->stride[d];
-            if(fwrite((char*)t->data_raw + off*t->elem_size, t->elem_size, 1, fp) != 1) return false;
+        for (size_t p = 0; p < t->numel; p++) {
+            size_t off = 0;
+            for (size_t d = 0; d < t->ndim; d++) off += idx[d] * t->stride[d];
+            if (fwrite((char*)t->data_raw + off * t->elem_size, t->elem_size, 1, fp) != 1)
+                return false;
             for(size_t d=t->ndim; d-- >0;){
                 idx[d]++;
                 if(idx[d] < t->shape[d]) break;

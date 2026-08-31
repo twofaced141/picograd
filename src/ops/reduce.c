@@ -9,7 +9,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { const float *src; float *dst; size_t outer; size_t len; size_t inner; size_t ostride; } reduce_sum_par_t;
+typedef struct {
+    const float *src;
+    float *dst;
+    size_t outer;
+    size_t len;
+    size_t inner;
+    size_t ostride;
+} reduce_sum_par_t;
 static void reduce_sum_par_fn(void *ctx, size_t s, size_t e){
     reduce_sum_par_t *p=ctx;
     for(size_t o=s;o<e;o++){
@@ -23,7 +30,14 @@ static void reduce_sum_par_fn(void *ctx, size_t s, size_t e){
         }
     }
 }
-typedef struct { const float *src; float *dst; size_t outer; size_t len; size_t inner; size_t ostride; } reduce_max_par_t;
+typedef struct {
+    const float *src;
+    float *dst;
+    size_t outer;
+    size_t len;
+    size_t inner;
+    size_t ostride;
+} reduce_max_par_t;
 static void reduce_max_par_fn(void *ctx, size_t s, size_t e){
     reduce_max_par_t *p=ctx;
     for(size_t o=s;o<e;o++){
@@ -62,7 +76,14 @@ static void reduce_sum1_par_fn(void *ctx, size_t s, size_t e){
         *dst=acc;
     }
 }
-typedef struct { const float *src; float *dst; size_t outer; size_t len; float init; float (*f)(float,float); } reduce_fold1_par_t;
+typedef struct {
+    const float *src;
+    float *dst;
+    size_t outer;
+    size_t len;
+    float init;
+    float (*f)(float, float);
+} reduce_fold1_par_t;
 static void reduce_fold1_par_fn(void *ctx, size_t s, size_t e){
     reduce_fold1_par_t *p=ctx;
     for(size_t o=s;o<e;o++){
@@ -167,7 +188,8 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
                     for (size_t v = 1; v < len; v++) {
                         const float *sptr = base + v * inner;
                         #pragma GCC ivdep
-                        for (size_t ii = 0; ii < inner; ii++) if (sptr[ii] > dptr[ii]) dptr[ii] = sptr[ii];
+                        for (size_t ii = 0; ii < inner; ii++)
+                            if (sptr[ii] > dptr[ii]) dptr[ii] = sptr[ii];
                     }
                 }
             }
@@ -184,7 +206,8 @@ static pg_tensor *reduce_fold(const pg_tensor *t, size_t axis, bool keepdim,
                     for (size_t v = 1; v < len; v++) {
                         const float *sptr = base + v * inner;
                         #pragma GCC ivdep
-                        for (size_t ii = 0; ii < inner; ii++) if (sptr[ii] < dptr[ii]) dptr[ii] = sptr[ii];
+                        for (size_t ii = 0; ii < inner; ii++)
+                            if (sptr[ii] < dptr[ii]) dptr[ii] = sptr[ii];
                     }
                 }
             }

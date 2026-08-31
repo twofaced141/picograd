@@ -8,8 +8,15 @@ void hgemm_avx512fp16_micro_c(size_t k, const uint16_t *a, size_t lda,
                              const uint16_t *b, size_t ldb,
                              float *c, size_t ldc, size_t m, size_t n){
     if (m==0 || n==0 || k==0) return;
-    if (m>16 || n>32) {
-        for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+    if (m > 16 || n > 32) {
+        for (size_t i = 0; i < m; i++) {
+            for (size_t j = 0; j < n; j++) {
+                float acc = c[i * ldc + j];
+                for (size_t p = 0; p < k; p++)
+                    acc += pg_f16_to_f32_scalar(a[i * lda + p]) * pg_f16_to_f32_scalar(b[p * ldb + j]);
+                c[i * ldc + j] = acc;
+            }
+        }
         return;
     }
     // Vectorized AVX512FP16: 16-wide F16 -> F32 convert + FMA
@@ -63,6 +70,13 @@ void hgemm_avx512fp16_micro_c(size_t k, const uint16_t *a, size_t lda,
 void hgemm_avx512fp16_micro_c(size_t k, const uint16_t *a, size_t lda,
                              const uint16_t *b, size_t ldb,
                              float *c, size_t ldc, size_t m, size_t n){
-    for(size_t i=0;i<m;i++) for(size_t j=0;j<n;j++){ float acc=c[i*ldc+j]; for(size_t p=0;p<k;p++) acc+=pg_f16_to_f32_scalar(a[i*lda+p])*pg_f16_to_f32_scalar(b[p*ldb+j]); c[i*ldc+j]=acc; }
+    for (size_t i = 0; i < m; i++) {
+        for (size_t j = 0; j < n; j++) {
+            float acc = c[i * ldc + j];
+            for (size_t p = 0; p < k; p++)
+                acc += pg_f16_to_f32_scalar(a[i * lda + p]) * pg_f16_to_f32_scalar(b[p * ldb + j]);
+            c[i * ldc + j] = acc;
+        }
+    }
 }
 #endif

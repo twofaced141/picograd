@@ -8,8 +8,13 @@
 typedef struct { const float *x; float *y; const float *w; const float *b; float eps; size_t N; } ln_par_t;
 
 static void layernorm_par(void *ctx, size_t s, size_t e){
-    ln_par_t *p=ctx;
-    const float *x=p->x; float *y=p->y; const float *w=p->w; const float *b=p->b; float eps=p->eps; size_t N=p->N;
+    ln_par_t *p = ctx;
+    const float *x = p->x;
+    float *y = p->y;
+    const float *w = p->w;
+    const float *b = p->b;
+    float eps = p->eps;
+    size_t N = p->N;
     for(size_t o=s;o<e;o++){
         const float *row=x + o*N;
         float *orow=y + o*N;
@@ -116,11 +121,23 @@ pg_tensor *pg_batchnorm2d(const pg_tensor *x, const pg_tensor *weight, const pg_
     if(eps <= 0) return NULL;
     if(momentum < 0 || momentum > 1) return NULL;
     size_t C = x->shape[1];
-    if(weight){ if(weight->ndim!=1 || weight->shape[0]!=C || !weight->data || weight->dtype!=PG_DTYPE_F32) return NULL; }
-    if(bias){ if(bias->ndim!=1 || bias->shape[0]!=C || !bias->data || bias->dtype!=PG_DTYPE_F32) return NULL; }
-    if(running_mean){ if(running_mean->ndim!=1 || running_mean->shape[0]!=C || !running_mean->data || running_mean->dtype!=PG_DTYPE_F32) return NULL; }
-    if(running_var){ if(running_var->ndim!=1 || running_var->shape[0]!=C || !running_var->data || running_var->dtype!=PG_DTYPE_F32) return NULL; }
-    if(!training && (!running_mean || !running_var)) return NULL;
+    if (weight) {
+        if (weight->ndim != 1 || weight->shape[0] != C || !weight->data || weight->dtype != PG_DTYPE_F32)
+            return NULL;
+    }
+    if (bias) {
+        if (bias->ndim != 1 || bias->shape[0] != C || !bias->data || bias->dtype != PG_DTYPE_F32)
+            return NULL;
+    }
+    if (running_mean) {
+        if (running_mean->ndim != 1 || running_mean->shape[0] != C || !running_mean->data || running_mean->dtype != PG_DTYPE_F32)
+            return NULL;
+    }
+    if (running_var) {
+        if (running_var->ndim != 1 || running_var->shape[0] != C || !running_var->data || running_var->dtype != PG_DTYPE_F32)
+            return NULL;
+    }
+    if (!training && (!running_mean || !running_var)) return NULL;
     // For simplicity require contiguous (most cases are)
     // but we will handle non-contig via generic strided loop if needed
     pg_tensor *y = pg_tensor_empty(x->ndim, x->shape);
@@ -130,7 +147,13 @@ pg_tensor *pg_batchnorm2d(const pg_tensor *x, const pg_tensor *weight, const pg_
     double *mean = (double*)calloc(C, sizeof(double));
     double *var = (double*)calloc(C, sizeof(double));
     float *invStd = (float*)calloc(C, sizeof(float));
-    if(!mean || !var || !invStd){ free(mean); free(var); free(invStd); pg_tensor_free(y); return NULL; }
+    if (!mean || !var || !invStd) {
+        free(mean);
+        free(var);
+        free(invStd);
+        pg_tensor_free(y);
+        return NULL;
+    }
 
     if(training){
         // first pass: sum

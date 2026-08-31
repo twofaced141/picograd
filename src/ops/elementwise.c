@@ -18,71 +18,171 @@ static float fpow(float x, float y) { return powf(x, y); }
 
 // parallel helpers for contiguous binary ops
 typedef struct { const float *a; const float *b; float *out; } bin_par_t;
-static void par_add(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_add(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_sub(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_sub(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_mul(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_mul(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_div(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; simd_bin_div(p->a+s, p->b+s, p->out+s, e-s); }
-static void par_pow(void *ctx, size_t s, size_t e){ bin_par_t *p=ctx; const float *a=p->a; const float *b=p->b; float *o=p->out; for(size_t i=s;i<e;i++) o[i]=powf(a[i],b[i]); }
+static void par_add(void *ctx, size_t s, size_t e) {
+    bin_par_t *p = ctx;
+    simd_bin_add(p->a + s, p->b + s, p->out + s, e - s);
+}
+static void par_sub(void *ctx, size_t s, size_t e) {
+    bin_par_t *p = ctx;
+    simd_bin_sub(p->a + s, p->b + s, p->out + s, e - s);
+}
+static void par_mul(void *ctx, size_t s, size_t e) {
+    bin_par_t *p = ctx;
+    simd_bin_mul(p->a + s, p->b + s, p->out + s, e - s);
+}
+static void par_div(void *ctx, size_t s, size_t e) {
+    bin_par_t *p = ctx;
+    simd_bin_div(p->a + s, p->b + s, p->out + s, e - s);
+}
+static void par_pow(void *ctx, size_t s, size_t e) {
+    bin_par_t *p = ctx;
+    const float *a = p->a;
+    const float *b = p->b;
+    float *o = p->out;
+    for (size_t i = s; i < e; i++) o[i] = powf(a[i], b[i]);
+}
 
 typedef struct { float av; const float *b; float *out; float (*f)(float,float); } scalar_par_t;
-static void par_scalar_a(void *ctx, size_t s, size_t e){ scalar_par_t *p=ctx; float av=p->av; const float *b=p->b; float *o=p->out; float (*f)(float,float)=p->f; for(size_t i=s;i<e;i++) o[i]=f(av,b[i]); }
-static void par_scalar_b(void *ctx, size_t s, size_t e){ scalar_par_t *p=ctx; float bv=p->av; const float *a=p->b; float *o=p->out; float (*f)(float,float)=p->f; for(size_t i=s;i<e;i++) o[i]=f(a[i],bv); }
+static void par_scalar_a(void *ctx, size_t s, size_t e) {
+    scalar_par_t *p = ctx;
+    float av = p->av;
+    const float *b = p->b;
+    float *o = p->out;
+    float (*f)(float, float) = p->f;
+    for (size_t i = s; i < e; i++) o[i] = f(av, b[i]);
+}
+static void par_scalar_b(void *ctx, size_t s, size_t e) {
+    scalar_par_t *p = ctx;
+    float bv = p->av;
+    const float *a = p->b;
+    float *o = p->out;
+    float (*f)(float, float) = p->f;
+    for (size_t i = s; i < e; i++) o[i] = f(a[i], bv);
+}
 
 typedef struct { float av; const float *b; float *out; } scalar_add_t;
-static void par_scalar_add_a(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float av=p->av; const float *b=p->b; float *o=p->out;
+static void par_scalar_add_a(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float av = p->av;
+    const float *b = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=av+b[i]; }
-static void par_scalar_sub_a(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float av=p->av; const float *b=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = av + b[i];
+}
+static void par_scalar_sub_a(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float av = p->av;
+    const float *b = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=av-b[i]; }
-static void par_scalar_mul_a(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float av=p->av; const float *b=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = av - b[i];
+}
+static void par_scalar_mul_a(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float av = p->av;
+    const float *b = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=av*b[i]; }
-static void par_scalar_div_a(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float av=p->av; const float *b=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = av * b[i];
+}
+static void par_scalar_div_a(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float av = p->av;
+    const float *b = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=av/b[i]; }
-static void par_scalar_add_b(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float bv=p->av; const float *a=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = av / b[i];
+}
+static void par_scalar_add_b(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float bv = p->av;
+    const float *a = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=a[i]+bv; }
-static void par_scalar_sub_b(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float bv=p->av; const float *a=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = a[i] + bv;
+}
+static void par_scalar_sub_b(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float bv = p->av;
+    const float *a = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=a[i]-bv; }
-static void par_scalar_mul_b(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float bv=p->av; const float *a=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = a[i] - bv;
+}
+static void par_scalar_mul_b(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float bv = p->av;
+    const float *a = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=a[i]*bv; }
-static void par_scalar_div_b(void *ctx, size_t s, size_t e){ scalar_add_t *p=ctx; float bv=p->av; const float *a=p->b; float *o=p->out;
+    for (size_t i = s; i < e; i++) o[i] = a[i] * bv;
+}
+static void par_scalar_div_b(void *ctx, size_t s, size_t e) {
+    scalar_add_t *p = ctx;
+    float bv = p->av;
+    const float *a = p->b;
+    float *o = p->out;
 #pragma GCC ivdep
-for(size_t i=s;i<e;i++) o[i]=a[i]/bv; }
+    for (size_t i = s; i < e; i++) o[i] = a[i] / bv;
+}
 
 typedef struct { const float *pa; const float *pb; float *po; size_t N; float (*f)(float,float); } row_bcast_t;
-static void row_bcast_fn(void *ctx, size_t s, size_t e){ row_bcast_t *p=ctx; for(size_t i=s;i<e;i++){ const float *par=p->pa+i*p->N; float *por=p->po+i*p->N; const float *pb=p->pb; float (*ff)(float,float)=p->f;
+static void row_bcast_fn(void *ctx, size_t s, size_t e) {
+    row_bcast_t *p = ctx;
+    for (size_t i = s; i < e; i++) {
+        const float *par = p->pa + i * p->N;
+        float *por = p->po + i * p->N;
+        const float *pb = p->pb;
+        float (*ff)(float, float) = p->f;
 #pragma GCC ivdep
-for(size_t j=0;j<p->N;j++) por[j]=ff(par[j],pb[j]); } }
-typedef struct { const float *pb; const float *pa; float *po; size_t N; float (*f)(float,float); } row_bcast2_t;
-static void row_bcast2_fn(void *ctx, size_t s, size_t e){ row_bcast2_t *p=ctx; for(size_t i=s;i<e;i++){ const float *pbr=p->pb+i*p->N; float *por=p->po+i*p->N; const float *pa=p->pa; float (*ff)(float,float)=p->f;
+        for (size_t j = 0; j < p->N; j++) por[j] = ff(par[j], pb[j]);
+    }
+}
+typedef struct { const float *pb; const float *pa; float *po; size_t N; float (*f)(float, float); } row_bcast2_t;
+static void row_bcast2_fn(void *ctx, size_t s, size_t e) {
+    row_bcast2_t *p = ctx;
+    for (size_t i = s; i < e; i++) {
+        const float *pbr = p->pb + i * p->N;
+        float *por = p->po + i * p->N;
+        const float *pa = p->pa;
+        float (*ff)(float, float) = p->f;
 #pragma GCC ivdep
-for(size_t j=0;j<p->N;j++) por[j]=ff(pa[j],pbr[j]); } }
+        for (size_t j = 0; j < p->N; j++) por[j] = ff(pa[j], pbr[j]);
+    }
+}
 
 // helper to dispatch vectorized parallel for same-shape contiguous
-static inline void dispatch_contiguous(const float *pa, const float *pb, float *po, size_t n, float (*f)(float,float)) {
+static inline void dispatch_contiguous(const float *pa, const float *pb, float *po, size_t n, float (*f)(float, float)) {
     if (n < 262144) {
-        if (f==fadd) { simd_bin_add(pa,pb,po,n); }
-        else if (f==fsub) { simd_bin_sub(pa,pb,po,n); }
-        else if (f==fmul) { simd_bin_mul(pa,pb,po,n); }
-        else if (f==fdiv) { simd_bin_div(pa,pb,po,n); }
-        else if (f==fpow) { for (size_t i=0;i<n;i++) po[i]=powf(pa[i],pb[i]); }
-        else { for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i]); }
+        if (f == fadd) {
+            simd_bin_add(pa, pb, po, n);
+        } else if (f == fsub) {
+            simd_bin_sub(pa, pb, po, n);
+        } else if (f == fmul) {
+            simd_bin_mul(pa, pb, po, n);
+        } else if (f == fdiv) {
+            simd_bin_div(pa, pb, po, n);
+        } else if (f == fpow) {
+            for (size_t i = 0; i < n; i++) po[i] = powf(pa[i], pb[i]);
+        } else {
+            for (size_t i = 0; i < n; i++) po[i] = f(pa[i], pb[i]);
+        }
         return;
     }
-    bin_par_t ctx={pa,pb,po};
-    if (f==fadd) pg_parallel_for(n, 65536, par_add, &ctx);
-    else if (f==fsub) pg_parallel_for(n, 65536, par_sub, &ctx);
-    else if (f==fmul) pg_parallel_for(n, 65536, par_mul, &ctx);
-    else if (f==fdiv) pg_parallel_for(n, 65536, par_div, &ctx);
-    else if (f==fpow) pg_parallel_for(n, 65536, par_pow, &ctx);
-    else {
-        #pragma GCC ivdep
-        for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i]);
+    bin_par_t ctx = {pa, pb, po};
+    if (f == fadd) {
+        pg_parallel_for(n, 65536, par_add, &ctx);
+    } else if (f == fsub) {
+        pg_parallel_for(n, 65536, par_sub, &ctx);
+    } else if (f == fmul) {
+        pg_parallel_for(n, 65536, par_mul, &ctx);
+    } else if (f == fdiv) {
+        pg_parallel_for(n, 65536, par_div, &ctx);
+    } else if (f == fpow) {
+        pg_parallel_for(n, 65536, par_pow, &ctx);
+    } else {
+#pragma GCC ivdep
+        for (size_t i = 0; i < n; i++) po[i] = f(pa[i], pb[i]);
     }
 }
 
@@ -216,23 +316,36 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
             if (n < 262144) {
                 if (f==fadd) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=av+pb[i];
+                    for (size_t i = 0; i < n; i++) po[i] = av + pb[i];
                 } else if (f==fsub) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=av-pb[i];
+                    for (size_t i = 0; i < n; i++) po[i] = av - pb[i];
                 } else if (f==fmul) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=av*pb[i];
+                    for (size_t i = 0; i < n; i++) po[i] = av * pb[i];
                 } else if (f==fdiv) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=av/pb[i];
-                } else for (size_t i=0;i<n;i++) po[i]=f(av,pb[i]);
+                    for (size_t i = 0; i < n; i++) po[i] = av / pb[i];
+                } else {
+                    for (size_t i = 0; i < n; i++) po[i] = f(av, pb[i]);
+                }
             } else {
-                if (f==fadd) { scalar_add_t ctx={av,pb,po}; pg_parallel_for(n,65536,par_scalar_add_a,&ctx); }
-                else if (f==fsub) { scalar_add_t ctx={av,pb,po}; pg_parallel_for(n,65536,par_scalar_sub_a,&ctx); }
-                else if (f==fmul) { scalar_add_t ctx={av,pb,po}; pg_parallel_for(n,65536,par_scalar_mul_a,&ctx); }
-                else if (f==fdiv) { scalar_add_t ctx={av,pb,po}; pg_parallel_for(n,65536,par_scalar_div_a,&ctx); }
-                else { scalar_par_t ctx={av,pb,po,f}; pg_parallel_for(n,65536,par_scalar_a,&ctx); }
+                if (f==fadd) {
+                    scalar_add_t ctx = {av, pb, po};
+                    pg_parallel_for(n, 65536, par_scalar_add_a, &ctx);
+                } else if (f==fsub) {
+                    scalar_add_t ctx = {av, pb, po};
+                    pg_parallel_for(n, 65536, par_scalar_sub_a, &ctx);
+                } else if (f==fmul) {
+                    scalar_add_t ctx = {av, pb, po};
+                    pg_parallel_for(n, 65536, par_scalar_mul_a, &ctx);
+                } else if (f==fdiv) {
+                    scalar_add_t ctx = {av, pb, po};
+                    pg_parallel_for(n, 65536, par_scalar_div_a, &ctx);
+                } else {
+                    scalar_par_t ctx = {av, pb, po, f};
+                    pg_parallel_for(n, 65536, par_scalar_a, &ctx);
+                }
             }
             return out;
         }
@@ -246,23 +359,36 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
             if (n < 262144) {
                 if (f==fadd) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=pa[i]+bv;
+                    for (size_t i = 0; i < n; i++) po[i] = pa[i] + bv;
                 } else if (f==fsub) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=pa[i]-bv;
+                    for (size_t i = 0; i < n; i++) po[i] = pa[i] - bv;
                 } else if (f==fmul) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=pa[i]*bv;
+                    for (size_t i = 0; i < n; i++) po[i] = pa[i] * bv;
                 } else if (f==fdiv) {
 #pragma GCC ivdep
-                    for(size_t i=0;i<n;i++) po[i]=pa[i]/bv;
-                } else for (size_t i=0;i<n;i++) po[i]=f(pa[i],bv);
+                    for (size_t i = 0; i < n; i++) po[i] = pa[i] / bv;
+                } else {
+                    for (size_t i = 0; i < n; i++) po[i] = f(pa[i], bv);
+                }
             } else {
-                if (f==fadd) { scalar_add_t ctx={bv,pa,po}; pg_parallel_for(n,65536,par_scalar_add_b,&ctx); }
-                else if (f==fsub) { scalar_add_t ctx={bv,pa,po}; pg_parallel_for(n,65536,par_scalar_sub_b,&ctx); }
-                else if (f==fmul) { scalar_add_t ctx={bv,pa,po}; pg_parallel_for(n,65536,par_scalar_mul_b,&ctx); }
-                else if (f==fdiv) { scalar_add_t ctx={bv,pa,po}; pg_parallel_for(n,65536,par_scalar_div_b,&ctx); }
-                else { scalar_par_t ctx={bv,pa,po,f}; pg_parallel_for(n,65536,par_scalar_b,&ctx); }
+                if (f==fadd) {
+                    scalar_add_t ctx = {bv, pa, po};
+                    pg_parallel_for(n, 65536, par_scalar_add_b, &ctx);
+                } else if (f==fsub) {
+                    scalar_add_t ctx = {bv, pa, po};
+                    pg_parallel_for(n, 65536, par_scalar_sub_b, &ctx);
+                } else if (f==fmul) {
+                    scalar_add_t ctx = {bv, pa, po};
+                    pg_parallel_for(n, 65536, par_scalar_mul_b, &ctx);
+                } else if (f==fdiv) {
+                    scalar_add_t ctx = {bv, pa, po};
+                    pg_parallel_for(n, 65536, par_scalar_div_b, &ctx);
+                } else {
+                    scalar_par_t ctx = {bv, pa, po, f};
+                    pg_parallel_for(n, 65536, par_scalar_b, &ctx);
+                }
             }
             return out;
         }
@@ -281,16 +407,21 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
                 for (size_t i = 0; i < M; i++) {
                     const float *par = pa + i * N;
                     float *por = po + i * N;
-                    if (f==fadd) simd_bin_add(par,pb,por,N);
-                    else if (f==fsub) simd_bin_sub(par,pb,por,N);
-                    else if (f==fmul) simd_bin_mul(par,pb,por,N);
-                    else if (f==fdiv) simd_bin_div(par,pb,por,N);
-                    else {
+                    if (f == fadd) {
+                        simd_bin_add(par, pb, por, N);
+                    } else if (f == fsub) {
+                        simd_bin_sub(par, pb, por, N);
+                    } else if (f == fmul) {
+                        simd_bin_mul(par, pb, por, N);
+                    } else if (f == fdiv) {
+                        simd_bin_div(par, pb, por, N);
+                    } else {
 #pragma GCC ivdep
-                    for (size_t j = 0; j < N; j++) por[j] = f(par[j], pb[j]); }
+                        for (size_t j = 0; j < N; j++) por[j] = f(par[j], pb[j]);
+                    }
                 }
             } else {
-                row_bcast_t ctx={pa,pb,po,N,f};
+                row_bcast_t ctx = {pa, pb, po, N, f};
                 pg_parallel_for(M, 4, row_bcast_fn, &ctx);
             }
             return out;
@@ -307,16 +438,21 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
                 for (size_t i = 0; i < M; i++) {
                     const float *pbr = pb + i * N;
                     float *por = po + i * N;
-                    if (f==fadd) simd_bin_add(pa,pbr,por,N);
-                    else if (f==fsub) simd_bin_sub(pa,pbr,por,N);
-                    else if (f==fmul) simd_bin_mul(pa,pbr,por,N);
-                    else if (f==fdiv) simd_bin_div(pa,pbr,por,N);
-                    else {
+                    if (f == fadd) {
+                        simd_bin_add(pa, pbr, por, N);
+                    } else if (f == fsub) {
+                        simd_bin_sub(pa, pbr, por, N);
+                    } else if (f == fmul) {
+                        simd_bin_mul(pa, pbr, por, N);
+                    } else if (f == fdiv) {
+                        simd_bin_div(pa, pbr, por, N);
+                    } else {
 #pragma GCC ivdep
-                    for (size_t j = 0; j < N; j++) por[j] = f(pa[j], pbr[j]); }
+                        for (size_t j = 0; j < N; j++) por[j] = f(pa[j], pbr[j]);
+                    }
                 }
             } else {
-                row_bcast2_t ctx={pb,pa,po,N,f};
+                row_bcast2_t ctx = {pb, pa, po, N, f};
                 pg_parallel_for(M, 4, row_bcast2_fn, &ctx);
             }
             return out;
@@ -330,26 +466,33 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
         if (a->numel == out->numel && b->numel == Nlast && is_contiguous(a) && is_contiguous(b) && is_contiguous(out)) {
             bool lead_match = (a->ndim == ndim);
             if (lead_match) {
-                for (size_t d=0; d<ndim; ++d) if (a->shape[d] != shape[d]) { lead_match=false; break; }
+                for (size_t d = 0; d < ndim; ++d) {
+                    if (a->shape[d] != shape[d]) { lead_match = false; break; }
+                }
             }
             if (lead_match) {
                 const float *pa = a->data;
                 const float *pb = b->data;
                 float *po = out->data;
                 if (outer * Nlast < 8192 || outer < 4) {
-                    for (size_t i=0;i<outer;i++) {
-                        const float *par = pa + i*Nlast;
-                        float *por = po + i*Nlast;
-                        if (f==fadd) simd_bin_add(par,pb,por,Nlast);
-                        else if (f==fsub) simd_bin_sub(par,pb,por,Nlast);
-                        else if (f==fmul) simd_bin_mul(par,pb,por,Nlast);
-                        else if (f==fdiv) simd_bin_div(par,pb,por,Nlast);
-                        else {
+                    for (size_t i = 0; i < outer; i++) {
+                        const float *par = pa + i * Nlast;
+                        float *por = po + i * Nlast;
+                        if (f == fadd) {
+                            simd_bin_add(par, pb, por, Nlast);
+                        } else if (f == fsub) {
+                            simd_bin_sub(par, pb, por, Nlast);
+                        } else if (f == fmul) {
+                            simd_bin_mul(par, pb, por, Nlast);
+                        } else if (f == fdiv) {
+                            simd_bin_div(par, pb, por, Nlast);
+                        } else {
 #pragma GCC ivdep
-                        for (size_t j=0;j<Nlast;j++) por[j]=f(par[j], pb[j]); }
+                            for (size_t j = 0; j < Nlast; j++) por[j] = f(par[j], pb[j]);
+                        }
                     }
                 } else {
-                    row_bcast_t ctx={pa,pb,po,Nlast,f};
+                    row_bcast_t ctx = {pa, pb, po, Nlast, f};
                     pg_parallel_for(outer, 4, row_bcast_fn, &ctx);
                 }
                 return out;
@@ -359,26 +502,33 @@ static pg_tensor *bcast_binary(const pg_tensor *a, const pg_tensor *b, float (*f
         if (b->numel == out->numel && a->numel == Nlast && is_contiguous(b) && is_contiguous(a) && is_contiguous(out)) {
             bool lead_match = (b->ndim == ndim);
             if (lead_match) {
-                for (size_t d=0; d<ndim; ++d) if (b->shape[d] != shape[d]) { lead_match=false; break; }
+                for (size_t d = 0; d < ndim; ++d) {
+                    if (b->shape[d] != shape[d]) { lead_match = false; break; }
+                }
             }
             if (lead_match) {
                 const float *pb = b->data;
                 const float *pa = a->data;
                 float *po = out->data;
                 if (outer * Nlast < 8192 || outer < 4) {
-                    for (size_t i=0;i<outer;i++) {
-                        const float *pbr = pb + i*Nlast;
-                        float *por = po + i*Nlast;
-                        if (f==fadd) simd_bin_add(pa,pbr,por,Nlast);
-                        else if (f==fsub) simd_bin_sub(pa,pbr,por,Nlast);
-                        else if (f==fmul) simd_bin_mul(pa,pbr,por,Nlast);
-                        else if (f==fdiv) simd_bin_div(pa,pbr,por,Nlast);
-                        else {
+                    for (size_t i = 0; i < outer; i++) {
+                        const float *pbr = pb + i * Nlast;
+                        float *por = po + i * Nlast;
+                        if (f == fadd) {
+                            simd_bin_add(pa, pbr, por, Nlast);
+                        } else if (f == fsub) {
+                            simd_bin_sub(pa, pbr, por, Nlast);
+                        } else if (f == fmul) {
+                            simd_bin_mul(pa, pbr, por, Nlast);
+                        } else if (f == fdiv) {
+                            simd_bin_div(pa, pbr, por, Nlast);
+                        } else {
 #pragma GCC ivdep
-                        for (size_t j=0;j<Nlast;j++) por[j]=f(pa[j], pbr[j]); }
+                            for (size_t j = 0; j < Nlast; j++) por[j] = f(pa[j], pbr[j]);
+                        }
                     }
                 } else {
-                    row_bcast2_t ctx={pb,pa,po,Nlast,f};
+                    row_bcast2_t ctx = {pb, pa, po, Nlast, f};
                     pg_parallel_for(outer, 4, row_bcast2_fn, &ctx);
                 }
                 return out;
@@ -483,7 +633,12 @@ static pg_tensor *try_map_gpu(const pg_tensor *a, int map_op)
 }
 
 typedef struct { float *d; float (*f)(float); } map_par_t;
-static void map_par_fn(void *ctx, size_t s, size_t e){ map_par_t *p=ctx; float *d=p->d; float (*ff)(float)=p->f; for(size_t i=s;i<e;i++) d[i]=ff(d[i]); }
+static void map_par_fn(void *ctx, size_t s, size_t e) {
+    map_par_t *p = ctx;
+    float *d = p->d;
+    float (*ff)(float) = p->f;
+    for (size_t i = s; i < e; i++) d[i] = ff(d[i]);
+}
 
 static pg_tensor *map1(const pg_tensor *a, float (*f)(float))
 {
@@ -494,10 +649,10 @@ static pg_tensor *map1(const pg_tensor *a, float (*f)(float))
     float *restrict pr = r->data;
     size_t n = r->numel;
     if (n < 65536) {
-        #pragma GCC ivdep
+#pragma GCC ivdep
         for (size_t i = 0; i < n; i++) pr[i] = f(pr[i]);
     } else {
-        map_par_t ctx={pr,f};
+        map_par_t ctx = {pr, f};
         pg_parallel_for(n, 65536, map_par_fn, &ctx);
     }
     return r;
@@ -557,7 +712,16 @@ pg_tensor *pg_sqrt(const pg_tensor *a)
 }
 
 typedef struct { float *d; float lo; float hi; } clamp_par_t;
-static void clamp_par_fn(void *ctx, size_t s, size_t e){ clamp_par_t *p=ctx; float *d=p->d; float lo=p->lo, hi=p->hi; for(size_t i=s;i<e;i++){ float v=d[i]; d[i]= v<lo?lo:(v>hi?hi:v); } }
+static void clamp_par_fn(void *ctx, size_t s, size_t e) {
+    clamp_par_t *p = ctx;
+    float *d = p->d;
+    float lo = p->lo;
+    float hi = p->hi;
+    for (size_t i = s; i < e; i++) {
+        float v = d[i];
+        d[i] = v < lo ? lo : (v > hi ? hi : v);
+    }
+}
 
 pg_tensor *pg_clamp(const pg_tensor *a, float lo, float hi)
 {
